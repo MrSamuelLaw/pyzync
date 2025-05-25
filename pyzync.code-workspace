@@ -5,7 +5,10 @@
 		}
 	],
 	"settings": {
-		"yapf.args": ["--style", "/home/samuel/documents/pyzync/.style.yapf"],
+		"yapf.args": [
+			"--style", 
+			"${workspaceFolder}/.style.yapf"
+		],
 		"[python]": {
 			"editor.formatOnSaveMode": "file",
 			"editor.formatOnSave": true,
