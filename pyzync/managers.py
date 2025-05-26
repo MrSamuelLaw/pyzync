@@ -14,7 +14,7 @@ from pathlib import PurePath
 from functools import partial
 from textwrap import dedent
 from itertools import groupby
-from typing import Optional, Literal
+from typing import Optional, Literal, Iterable
 
 from pydantic import BaseModel, ConfigDict
 
@@ -177,13 +177,50 @@ class HostSnapshotManager:
                 print(e.stderr, file=sys.stderr)
                 raise
 
-        iterator = _iterator()
+        iterator: Iterable[bytes] = _iterator()
         stream = SnapshotStream(
             ref=ref,
             anchor=anchor,
             iterable=iterator,
         )
         return stream
+
+    def recv(stream: SnapshotStream):
+        """Receive and restore a ZFS snapshot stream.
+
+        Args:
+            stream: SnapshotStream containing the snapshot data to restore
+
+        Raises:
+            subprocess.CalledProcessError: If snapshot receive operation fails
+            RuntimeError: If subprocess stdin cannot be opened
+        """
+        try:
+            # Build the command for receiving the snapshot
+            cmd = ["zfs", "recv", "-F", stream.ref.zfs_prefix]
+
+            # Use Popen to create a process we can write to
+            with subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  bufsize=0) as process:
+
+                # Check that stdin pipe is available
+                if process.stdin is None:
+                    raise RuntimeError("Failed to open stdin for the subprocess")
+
+                # Write stream data to the process
+                for block in stream.iterable:
+                    process.stdin.write(block)
+                process.stdin.close()
+
+                # Check for errors
+                returncode = process.wait(1)
+                if returncode:
+                    error = process.stderr.read()
+                    raise subprocess.CalledProcessError(returncode, cmd, stderr=error)
+
+        except subprocess.CalledProcessError as e:
+            print(e.stderr, file=sys.stderr)
+            raise
 
 
 class LineageTableNode(BaseModel):
@@ -246,6 +283,14 @@ class FileSnapshotManager:
     incremental snapshots. Complete snapshots contain all the data needed 
     for a full restore, while incremental snapshots only contain changes 
     since a previous snapshot."""
+
+    def __init__(self, adapter: SnapshotStorageAdapter):
+        """Initialize with a storage adapter.
+        
+        Args:
+            adapter: Adapter for accessing snapshot data
+        """
+        self.__adapter = adapter
 
     @staticmethod
     def _compute_lineage_tables(filepaths: list[PurePath]):
@@ -351,12 +396,10 @@ class FileSnapshotManager:
                 refs.append(SnapshotRef(date=date, zfs_prefix=table.zfs_prefix))
         return refs
 
-    @classmethod
-    def query(cls, adapter: SnapshotStorageAdapter, zfs_prefix: Optional[PurePath] = None):
-        """Query snapshots using the provided adapter.
+    def query(self, zfs_prefix: Optional[PurePath] = None):
+        """Query snapshots using the configured adapter.
 
         Args:
-            adapter: Adapter for accessing snapshot data
             zfs_prefix: Optional path to filter snapshots by dataset
 
         Returns:
@@ -364,9 +407,9 @@ class FileSnapshotManager:
         """
         if zfs_prefix is not None:
             zfs_prefix = SnapshotRef.format_zfs_prefix(zfs_prefix)
-        matches = adapter.query(zfs_prefix)
-        lineage_tables = cls._compute_lineage_tables(matches)
-        refs = cls._compute_refs_from_lineage_tables(lineage_tables)
+        matches = self.__adapter.query(zfs_prefix)
+        lineage_tables = self._compute_lineage_tables(matches)
+        refs = self._compute_refs_from_lineage_tables(lineage_tables)
         return refs
 
     @staticmethod
@@ -410,11 +453,10 @@ class FileSnapshotManager:
                 [c[1] for c in table.data if (c[1] is not None) and (c[1].node_type == 'complete')])
         return False
 
-    @classmethod
-    def destroy(cls, adapter: SnapshotStorageAdapter, ref: SnapshotRef):
+    def destroy(self, ref: SnapshotRef):
         # query the files related to the ref
-        matches = adapter.query(ref.zfs_prefix)
-        tables = cls._compute_lineage_tables(matches)
+        matches = self.__adapter.query(ref.zfs_prefix)
+        tables = self._compute_lineage_tables(matches)
 
         # if multiple lineages were found, something went wrong
         if len(tables) > 1:
@@ -423,7 +465,7 @@ class FileSnapshotManager:
 
         # ensure ref is deletable
         table = tables[0]
-        if not cls._is_ref_deletable(table, ref):
+        if not self._is_ref_deletable(table, ref):
             raise DataIntegrityError(
                 f'Cannot delete snapshot {ref} as it would break snapshot lineage. '
                 'Only the most recent snapshot or oldest snapshot (with complete backup) '
@@ -431,42 +473,36 @@ class FileSnapshotManager:
         row_idx = table.index.index(ref.date)
         row = [col[row_idx] for col in table.data if col[row_idx] is not None]
         filepaths = [table.zfs_prefix.joinpath(v.filename) for v in row]
-        success_flags = adapter.destroy(filepaths)
+        success_flags = self.__adapter.destroy(filepaths)
         return (filepaths, success_flags)
 
-    @classmethod
-    def prune(cls, adapter: SnapshotStorageAdapter, zfs_prefix: PurePath):
+    def prune(self, zfs_prefix: PurePath):
         zfs_prefix = SnapshotRef.format_zfs_prefix(zfs_prefix)
-        paths = adapter.query(zfs_prefix)
-        tables = cls._compute_lineage_tables(paths)
+        paths = self.__adapter.query(zfs_prefix)
+        tables = self._compute_lineage_tables(paths)
         filepaths, success_flags = ([], [])
         for table in tables:
             filepaths.extend([table.zfs_prefix.joinpath(n.filename) for n in table.orphaned_nodes])
-            redundent_nodes = cls._compute_redundent_nodes(table)
+            redundent_nodes = self._compute_redundent_nodes(table)
             filepaths.extend([table.zfs_prefix.joinpath(n.filename) for n in redundent_nodes])
-            success_flags.extend(adapter.destroy(filepaths))
+            success_flags.extend(self.__adapter.destroy(filepaths))
         return (filepaths, success_flags)
 
-    @staticmethod
-    def recv(adapter: SnapshotStorageAdapter, stream: SnapshotStream):
+    def recv(self, stream: SnapshotStream):
         # validate that we won't be overwriting an existing file
-        paths = adapter.query(stream.ref.zfs_prefix)
+        paths = self.__adapter.query(stream.ref.zfs_prefix)
         filenames = [p.name for p in paths]
         if stream.filename in filenames:
             raise DataIntegrityError(f'Cannot overwrite existing file = {stream.filename}')
 
         # write it out using the adapter
-        return adapter.recv(stream)
+        return self.__adapter.recv(stream)
 
-    @classmethod
-    def send(cls,
-             adapter: SnapshotStorageAdapter,
-             ref: SnapshotRef,
-             anchor: Optional[SnapshotRef] = None):
+    def send(self, ref: SnapshotRef, anchor: Optional[SnapshotRef] = None):
         """Generates SnapshotStream using the adapter"""
         # get the lineage table
-        filepaths = adapter.query(ref.zfs_prefix)
-        tables = cls._compute_lineage_tables(filepaths)
+        filepaths = self.__adapter.query(ref.zfs_prefix)
+        tables = self._compute_lineage_tables(filepaths)
         if len(tables) > 1:
             raise ValueError(f'Multiple lineage tables found when attempting to send ref {ref}. '
                              'Expected exactly one table')
@@ -488,7 +524,7 @@ class FileSnapshotManager:
                     for n in col[anchor_idx:ref_idx]
                     if n is not None
                 ]
-                iterable = adapter.send(filepaths)
+                iterable = self.__adapter.send(filepaths)
                 stream = SnapshotStream(ref=ref, anchor=anchor, iterable=iterable)
                 return stream
             # if iteration completes without finding a match raise an exception

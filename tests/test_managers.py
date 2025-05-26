@@ -112,20 +112,21 @@ class TestFileSnapshotManager(unittest.TestCase):
         adapter = mock.NonCallableMagicMock()
         paths = ['test/foo/20250504.zfs']
         adapter.query = lambda _: [PurePath(p) for p in paths]
-        refs = FileSnapshotManager.query(adapter)
+        manager = FileSnapshotManager(adapter)
+        refs = manager.query()
         self.assertIsInstance(refs[0], SnapshotRef)
         self.assertEqual(refs[0].zfs_handle, 'test/foo@20250504')
 
         # multiple complete files
         paths = ['test/foo/20250504.zfs', 'test/foo/20250505.zfs']
-        refs = FileSnapshotManager.query(adapter)
+        refs = manager.query()
         self.assertEqual(len(refs), 2)
 
         # a single chain of snapshots
         paths = [
             'test/foo/20250504.zfs', 'test/foo/20250504_20250505.zfs', 'test/foo/20250505_20250506.zfs'
         ]
-        refs = FileSnapshotManager.query(adapter)
+        refs = manager.query()
         self.assertEqual(len(refs), 3)
 
         # two chains of snapshots
@@ -133,7 +134,7 @@ class TestFileSnapshotManager(unittest.TestCase):
             'test/foo/20250504.zfs', 'test/foo/20250504_20250505.zfs', 'test/foo/20250505_20250506.zfs',
             'test/bar/20250504.zfs', 'test/bar/20250504_20250505.zfs', 'test/bar/20250505_20250506.zfs'
         ]
-        refs = FileSnapshotManager.query(adapter)
+        refs = manager.query()
         self.assertEqual(len(refs), 6)
 
         # one good chain and one broken
@@ -143,14 +144,14 @@ class TestFileSnapshotManager(unittest.TestCase):
         ]
         # with self.assertRaises(DataCorruptionError) as ct:
         with self.assertWarns(Warning) as ct:
-            refs = FileSnapshotManager.query(adapter)
+            refs = manager.query()
 
         # two chains and one with a newer complete snapshot
         paths = [
             'test/foo/20250504.zfs', 'test/foo/20250504_20250505.zfs', 'test/foo/20250505.zfs',
             'test/bar/20250504.zfs', 'test/bar/20250504_20250505.zfs', 'test/bar/20250505_20250506.zfs'
         ]
-        refs = FileSnapshotManager.query(adapter)
+        refs = manager.query()
         self.assertEqual(len(refs), 5)
 
     def test_can_compute_redundent_nodes(self):
@@ -268,15 +269,16 @@ class TestFileSnapshotManager(unittest.TestCase):
         adapter = mock.NonCallableMagicMock()
         adapter.query = lambda _: paths
         adapter.destroy = lambda x: [True] * len(x)
+        manager = FileSnapshotManager(adapter)
 
         ref = SnapshotRef(date='20250122', zfs_prefix='tank/foo')
-        filepaths, success_flags = FileSnapshotManager.destroy(adapter, ref)
+        filepaths, success_flags = manager.destroy(ref)
         self.assertTrue(all(success_flags))
 
         # if I try to delete 123 it should fail because 122 still exists
         ref = SnapshotRef(date='20250123', zfs_prefix='tank/foo')
         with self.assertRaises(DataIntegrityError) as ct:
-            FileSnapshotManager.destroy(adapter, ref)
+            manager.destroy(ref)
 
     def test_can_prune(self):
         # pretend we just deleted 122
@@ -292,10 +294,11 @@ class TestFileSnapshotManager(unittest.TestCase):
         adapter = mock.NonCallableMagicMock()
         adapter.query = lambda _: paths
         adapter.destroy = lambda x: [True] * len(x)
+        manager = FileSnapshotManager(adapter)
 
         # we should have a warning about orphaned nodes
         with self.assertWarns(Warning) as ct:
-            file_paths, success_flags = FileSnapshotManager.prune(adapter, 'tank/foo')
+            file_paths, success_flags = manager.prune('tank/foo')
             self.assertTrue(all(success_flags))
             self.assertEqual(set(file_paths), {paths[1], paths[2]})
 
@@ -305,5 +308,6 @@ class TestFileSnapshotManager(unittest.TestCase):
         adapter = mock.NonCallableMagicMock()
         adapter.query = lambda _: []
         adapter.recv = lambda _: stream.ref.zfs_prefix.joinpath(stream.filename)
-        filename = FileSnapshotManager.recv(adapter, stream)
+        manager = FileSnapshotManager(adapter)
+        filename = manager.recv(stream)
         self.assertEqual(filename, PurePath('tank/foo/20250404.zfs'))

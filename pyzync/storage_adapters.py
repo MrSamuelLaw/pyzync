@@ -18,14 +18,15 @@ class LocalFileSnapshotDataAdapter(SnapshotStorageAdapter):
     are absolute and handles file operations safely.
     """
 
+    def __init__(self, directory: str | Path):
+        directory = Path(directory)
+        self.directory = self.validate_path(directory).resolve()
+
     @staticmethod
     def validate_path(directory: Path):
         if not directory.is_absolute():
             raise ValueError(f"directory must be absolute, instead received path = {directory}")
         return directory
-
-    def __init__(self, directory: Path):
-        self.directory = self.validate_path(directory).resolve()
 
     def query(self, zfs_prefix: Path = None):
         """Search for snapshot files in the specified directory.
@@ -113,4 +114,4 @@ class LocalFileSnapshotDataAdapter(SnapshotStorageAdapter):
                 with open(fp, 'rb', buffering=0) as handle:
                     yield handle.read(blocksize)
 
-        return _iterable
+        return _iterable()

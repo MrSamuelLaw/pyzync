@@ -73,10 +73,9 @@ class SnapshotStream(BaseModel):
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
     ref: SnapshotRef
-    iterable: Iterable[bytes]
-
     # the anchor snapshot when doing zfs send -i <anchor>..<snapshot> ...
     anchor: Optional[SnapshotRef] = Field(None)
+    iterable: Iterable[bytes]
 
     @model_validator(mode="after")
     def validate_snapshot_refs(self):
