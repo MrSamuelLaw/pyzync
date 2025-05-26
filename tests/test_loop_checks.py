@@ -5,66 +5,75 @@ from pathlib import Path, PurePath
 from pyzync.managers import HostSnapshotManager, FileSnapshotManager
 from pyzync.storage_adapters import LocalFileSnapshotDataAdapter
 
-# class TestLocalFileLoopCheck(unittest.TestCase):
 
-#     def test_can_use_local_file_snapshot_data_adapter(self):
-#         """Test that ensures that data is able to be sent to a local file
-#         and used to recover lost data.
-#         """
+class TestLocalFileLoopCheck(unittest.TestCase):
 
-#         # get an instance of the adapter
-#         directory = Path(__file__).resolve().parent
-#         directory = directory.joinpath('local_storage_adapter_files')
-#         adapter = LocalFileSnapshotDataAdapter(directory)
-#         file_manager = FileSnapshotManager(adapter)
+    def test_can_backup_and_restore_using_incremental_backups(self):
+        """Test that ensures that data is able to be sent to a local file
+        and used to recover lost data.
+        """
 
-#         # clean up any lingering files
-#         refs = FileSnapshotManager.query(adapter)
-#         refs = sorted(refs, key=lambda r: r.date, reverse=True)
-#         [FileSnapshotManager.destroy(adapter, r) for r in refs]
+        # get an instance of the adapter
+        directory = Path(__file__).resolve().parent
+        directory = directory.joinpath('local_storage_adapter_files')
+        adapter = LocalFileSnapshotDataAdapter(directory)
+        manager = FileSnapshotManager(adapter)
 
-#         # query snapshots that are related to the file system
-#         zfs_root = PurePath("tank0/foo")
-#         refs = HostSnapshotManager.query(zfs_root)
-#         [HostSnapshotManager.destroy(ref) for ref in refs]
+        # clean up any lingering files
+        refs = manager.query()
+        refs = sorted(refs, key=lambda r: r.date, reverse=True)
+        [manager.destroy(r) for r in refs]
 
-#         # case 1 from the node_diagram
-#         dates = [
-#             '20250122',
-#             '20250123',
-#             '20250124',
-#             '20250125',
-#             '20250126',
-#         ]
-#         refs = [HostSnapshotManager.create(zfs_root, d) for d in dates]
+        # query snapshots that are related to the file system
+        zfs_root = PurePath("tank0/foo")
+        refs = HostSnapshotManager.query(zfs_root)
+        [HostSnapshotManager.destroy(ref) for ref in refs]
 
-#         # create the first complete stream
-#         streams = [HostSnapshotManager.send(refs[0])]
+        # case 1 from the node_diagram
+        dates = [
+            '20250122',
+            '20250123',
+            '20250124',
+            '20250125',
+            '20250126',
+        ]
+        refs = []
+        # add a fake file for testing for each date
+        for d in dates:
+            path = Path(f'/tank0/foo/{d}.txt')
+            path.touch(exist_ok=True)
+            refs.append(HostSnapshotManager.create(zfs_root, d))
+            path.unlink()
 
-#         # create the incremental streams
-#         streams.extend([HostSnapshotManager.send(ref, anchor) for anchor, ref in zip(refs, refs[1:])])
+        # create the first complete stream
+        streams = HostSnapshotManager.send(refs[0])
 
-#         # send those streams to local storage
-#         filepaths = [FileSnapshotManager.recv(adapter, stream) for stream in streams]
+        # create the incremental streams
+        streams.extend([HostSnapshotManager.send(ref, base)[0] for base, ref in zip(refs, refs[1:])])
 
-#         # verify the ref is queryable now that it exists
-#         file_refs = FileSnapshotManager.query(adapter)
-#         self.assertEqual(set(refs), set(file_refs))
+        # send those streams to local storage
+        filepaths = [manager.recv(stream) for stream in streams]
 
-#         # destroy the snapshot from the host
-#         [HostSnapshotManager.destroy(ref) for ref in refs]
+        # verify the ref is queryable now that it exists
+        file_refs = manager.query()
+        self.assertEqual(set(refs), set(file_refs))
 
-#         # restore them from the files we saved
-#         streams = [FileSnapshotManager.send(adapter, ref) for ref in refs]
-#         [HostSnapshotManager.recv(stream) for stream in streams]
+        # destroy the snapshots from the host
+        [HostSnapshotManager.destroy(ref) for ref in refs]
 
-#         # # requery to verify that its gone
-#         # host_refs = HostSnapshotManager.query()
-#         # self.assertNotIn(ref, host_refs)
+        # verify that the dataset is empty
+        path = Path('/tank0/foo')
+        self.assertFalse(any(path.iterdir()))
 
-#         # # destroy from the local file system
-#         # FileSnapshotManager.destroy(adapter, ref)
+        # restore the files in order and check that the directory contains the file expected
+        refs = manager.query()
+        ref = max(refs, key=lambda r: r.date)
+        streams = manager.send(ref)
+        for s, d in zip(streams, dates):
+            HostSnapshotManager.recv(s)
+            path = Path(f'/tank0/foo/{d}.txt')
+            self.assertTrue(path.exists())
 
-#         # # requery to verify that its gone
-#         # file_refs = FileSnapshotManager.query(adapter)
-#         # self.assertNotIn(ref, file_refs)
+        # verify that every snapshot was received
+        path = Path(f'/tank0/foo/{dates[-1]}.txt')
+        self.assertTrue(path.exists())

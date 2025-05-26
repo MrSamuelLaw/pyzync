@@ -11,15 +11,15 @@ from pyzync.managers import HostSnapshotManager, FileSnapshotManager
 class TestSnapshotRef(unittest.TestCase):
 
     def test_can_instantiate_HostSnapshotRef(self):
-        ref = SnapshotRef(zfs_prefix="tank/foo", date="20250322")
+        ref = SnapshotRef(zfs_dataset_path="tank/foo", date="20250322")
 
     def test_cannot_create_absolute_root(self):
         with self.assertRaises(ValueError) as ct:
-            SnapshotRef(zfs_prefix="/tank/foo", date="20250322")
+            SnapshotRef(zfs_dataset_path="/tank/foo", date="20250322")
 
     def test_cannot_create_with_empty_root(self):
         with self.assertRaises(ValueError) as ct:
-            SnapshotRef(zfs_prefix="", date="20250322")
+            SnapshotRef(zfs_dataset_path="", date="20250322")
 
 
 class TestHostSnapshotManager(unittest.TestCase):
@@ -28,20 +28,20 @@ class TestHostSnapshotManager(unittest.TestCase):
         # query snapshots that are related to the file system
         zfs_root = PurePath("tank0/foo")
         refs = HostSnapshotManager.query(zfs_root)
+        [HostSnapshotManager.destroy(ref) for ref in refs]
 
         # destroy duplicates if they exist
         date = Date.fromisoformat("20250322")
-        [HostSnapshotManager.destroy(ref) for ref in refs if ref.date == date]
 
         # create a new snapshot
         ref = HostSnapshotManager.create(zfs_root, date)
-        self.assertEqual(ref.zfs_handle, "tank0/foo@20250322")
+        self.assertEqual(ref.zfs_snapshot_id, "tank0/foo@20250322")
         self.assertTrue(ref.date, date)
-        self.assertTrue(ref.zfs_prefix, ref.zfs_prefix)
+        self.assertTrue(ref.zfs_dataset_path, ref.zfs_dataset_path)
 
         # get the data stream object
-        stream = HostSnapshotManager.send(ref)
-        chunk = next(stream.iterable)
+        stream = HostSnapshotManager.send(ref)[0]
+        chunk = next(stream.snapshot_stream)
         self.assertTrue(type(chunk) is bytes, "Data is not bytes")
         self.assertGreater(len(chunk), 0)
 
@@ -65,7 +65,7 @@ class TestFileSnapshotManager(unittest.TestCase):
         paths = [PurePath(p) for p in paths]
         tables = FileSnapshotManager._compute_lineage_tables(paths)
 
-        # assert only one zfs_prefix found
+        # assert only one zfs_dataset_path found
         self.assertEqual(len(tables), 1)
 
         # assert that the graph goes two deep
@@ -115,7 +115,7 @@ class TestFileSnapshotManager(unittest.TestCase):
         manager = FileSnapshotManager(adapter)
         refs = manager.query()
         self.assertIsInstance(refs[0], SnapshotRef)
-        self.assertEqual(refs[0].zfs_handle, 'test/foo@20250504')
+        self.assertEqual(refs[0].zfs_snapshot_id, 'test/foo@20250504')
 
         # multiple complete files
         paths = ['test/foo/20250504.zfs', 'test/foo/20250505.zfs']
@@ -154,7 +154,7 @@ class TestFileSnapshotManager(unittest.TestCase):
         refs = manager.query()
         self.assertEqual(len(refs), 5)
 
-    def test_can_compute_redundent_nodes(self):
+    def test_can_compute_redundant_nodes(self):
         # Please see diagram node_diagram.drawio for a graphical represnetation of the LineageTable
 
         # case 1
@@ -170,10 +170,10 @@ class TestFileSnapshotManager(unittest.TestCase):
         paths = [PurePath(p) for p in paths]
         tables = FileSnapshotManager._compute_lineage_tables(paths)
         table = tables[0]
-        redundent_nodes = FileSnapshotManager._compute_redundent_nodes(table)
-        # 124 should be redundent as it is not needed to go from 122 to 126
-        # 122_124 should be redundent as 124 can be derived from 123_124 and has a null in the column
-        self.assertEqual({rn.filename for rn in redundent_nodes},
+        redundant_nodes = FileSnapshotManager._compute_redundant_nodes(table)
+        # 124 should be redundant as it is not needed to go from 122 to 126
+        # 122_124 should be redundant as 124 can be derived from 123_124 and has a null in the column
+        self.assertEqual({rn.filename for rn in redundant_nodes},
                          {'20250124.zfs', '20250122_20250124.zfs'})
 
         # case 2
@@ -189,10 +189,10 @@ class TestFileSnapshotManager(unittest.TestCase):
         paths = [PurePath(p) for p in paths]
         tables = FileSnapshotManager._compute_lineage_tables(paths)
         table = tables[0]
-        redundent_nodes = FileSnapshotManager._compute_redundent_nodes(table)
-        # 124 should be redundent as it is not needed to go from 122 to 126
-        # 122_125 should be redundent as 125 can be derived from 124_125 and has a null in the column
-        self.assertEqual({rn.filename for rn in redundent_nodes},
+        redundant_nodes = FileSnapshotManager._compute_redundant_nodes(table)
+        # 124 should be redundant as it is not needed to go from 122 to 126
+        # 122_125 should be redundant as 125 can be derived from 124_125 and has a null in the column
+        self.assertEqual({rn.filename for rn in redundant_nodes},
                          {'20250124.zfs', '20250122_20250125.zfs'})
 
         # case 3
@@ -210,7 +210,7 @@ class TestFileSnapshotManager(unittest.TestCase):
         with self.assertWarns(Warning) as ct:
             tables = FileSnapshotManager._compute_lineage_tables(paths)
             table = tables[0]
-            redundent_nodes = FileSnapshotManager._compute_redundent_nodes(table)
+            redundant_nodes = FileSnapshotManager._compute_redundant_nodes(table)
 
         # case 4 is an invalid version of case 3, where the earliest incremental snapshot end date
         # is prior to the earliest complete snapshot date.
@@ -228,7 +228,7 @@ class TestFileSnapshotManager(unittest.TestCase):
         with self.assertWarns(Warning) as ct:
             tables = FileSnapshotManager._compute_lineage_tables(paths)
             table = tables[0]
-            redundent_nodes = FileSnapshotManager._compute_redundent_nodes(table)
+            redundant_nodes = FileSnapshotManager._compute_redundant_nodes(table)
 
     def test_can_compute_deleteable_refs(self):
         # case 1
@@ -244,13 +244,13 @@ class TestFileSnapshotManager(unittest.TestCase):
         paths = [PurePath(p) for p in paths]
         tables = FileSnapshotManager._compute_lineage_tables(paths)
         table = tables[0]
-        ref = SnapshotRef(date='20250122', zfs_prefix='tank/foo')
+        ref = SnapshotRef(date='20250122', zfs_dataset_path='tank/foo')
         is_deletable = FileSnapshotManager._is_ref_deletable(table, ref)
         self.assertTrue(is_deletable)
-        ref = SnapshotRef(date='20250123', zfs_prefix='tank/foo')
+        ref = SnapshotRef(date='20250123', zfs_dataset_path='tank/foo')
         is_deletable = FileSnapshotManager._is_ref_deletable(table, ref)
         self.assertFalse(is_deletable)
-        ref = SnapshotRef(date='20250126', zfs_prefix='tank/foo')
+        ref = SnapshotRef(date='20250126', zfs_dataset_path='tank/foo')
         is_deletable = FileSnapshotManager._is_ref_deletable(table, ref)
         self.assertTrue(is_deletable)
 
@@ -271,12 +271,12 @@ class TestFileSnapshotManager(unittest.TestCase):
         adapter.destroy = lambda x: [True] * len(x)
         manager = FileSnapshotManager(adapter)
 
-        ref = SnapshotRef(date='20250122', zfs_prefix='tank/foo')
+        ref = SnapshotRef(date='20250122', zfs_dataset_path='tank/foo')
         filepaths, success_flags = manager.destroy(ref)
         self.assertTrue(all(success_flags))
 
         # if I try to delete 123 it should fail because 122 still exists
-        ref = SnapshotRef(date='20250123', zfs_prefix='tank/foo')
+        ref = SnapshotRef(date='20250123', zfs_dataset_path='tank/foo')
         with self.assertRaises(DataIntegrityError) as ct:
             manager.destroy(ref)
 
@@ -303,11 +303,11 @@ class TestFileSnapshotManager(unittest.TestCase):
             self.assertEqual(set(file_paths), {paths[1], paths[2]})
 
     def test_can_recv(self):
-        ref = SnapshotRef(date='20250404', zfs_prefix='tank/foo')
-        stream = SnapshotStream(ref=ref, iterable=[b'somebytes'])
+        ref = SnapshotRef(date='20250404', zfs_dataset_path='tank/foo')
+        stream = SnapshotStream(ref=ref, snapshot_stream=[b'somebytes'])
         adapter = mock.NonCallableMagicMock()
         adapter.query = lambda _: []
-        adapter.recv = lambda _: stream.ref.zfs_prefix.joinpath(stream.filename)
+        adapter.recv = lambda _: stream.ref.zfs_dataset_path.joinpath(stream.filename)
         manager = FileSnapshotManager(adapter)
         filename = manager.recv(stream)
         self.assertEqual(filename, PurePath('tank/foo/20250404.zfs'))
