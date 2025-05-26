@@ -114,4 +114,4 @@ class LocalFileSnapshotDataAdapter(SnapshotStorageAdapter, BaseModel):
 
 
 class Adapter(Enum):
-    local_file: LocalFileSnapshotDataAdapter
+    local_file = LocalFileSnapshotDataAdapter

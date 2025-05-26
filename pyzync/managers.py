@@ -93,7 +93,7 @@ class HostSnapshotManager:
             return snapshots
 
         except subprocess.CalledProcessError as e:
-            if e.stderr.strip() == "no datasets available":
+            if (e.stderr.strip() == "no datasets available") or (e.returncode == 1):  # this indicates grep didn't find any matches
                 result: list[SnapshotRef] = []
                 return result
             print(e.stderr, file=sys.stderr)

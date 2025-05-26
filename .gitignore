@@ -1,3 +1,6 @@
 __pycache__/
 /dev
+script.py
 script.ipynb
+tests/local_storage_adapter_files/
+tests/test_sync_files/

@@ -16,7 +16,7 @@ class TestLocalFileLoopCheck(unittest.TestCase):
         # get an instance of the adapter
         directory = Path(__file__).resolve().parent
         directory = directory.joinpath('local_storage_adapter_files')
-        adapter = LocalFileSnapshotDataAdapter(directory)
+        adapter = LocalFileSnapshotDataAdapter(directory=directory)
         manager = FileSnapshotManager(adapter)
 
         # clean up any lingering files
