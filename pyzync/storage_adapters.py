@@ -111,7 +111,3 @@ class LocalFileSnapshotDataAdapter(SnapshotStorageAdapter, BaseModel):
                     yield chunk
 
         return _snapshot_stream()
-
-
-class Adapter(Enum):
-    local_file = LocalFileSnapshotDataAdapter

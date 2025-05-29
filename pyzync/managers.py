@@ -81,6 +81,7 @@ class HostSnapshotManager:
             if zfs_dataset_path is None:
                 regex = r"(\w|\/)+@\d{8}"
             else:
+                zfs_dataset_path = SnapshotRef.format_zfs_dataset_path(zfs_dataset_path)
                 regex = str(zfs_dataset_path) + r"@\d{8}"
             result = subprocess.run(
                 ["bash", "-c", f'zfs list -t snapshot -o name | grep -P "{regex}"'],
@@ -193,43 +194,45 @@ class HostSnapshotManager:
         return [stream]
 
     @staticmethod
-    def recv(stream: SnapshotStream):
+    def recv(streams: list[SnapshotStream]):
         """
         Receive and restore a ZFS snapshot stream.
 
         Args:
-            stream (SnapshotStream): SnapshotStream containing the snapshot data to restore.
+            stream (list[SnapshotStream]): SnapshotStream containing the snapshot data to restore.
+                                           SnapshotStreams will be received in the order they appear in the list
 
         Raises:
             subprocess.CalledProcessError: If snapshot receive operation fails.
             RuntimeError: If subprocess stdin cannot be opened.
         """
-        try:
-            # Build the command for receiving the snapshot
-            cmd = ["zfs", "recv", "-F", stream.ref.zfs_dataset_path]
-            with subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE,
-                                  bufsize=0) as process:
+        for stream in streams:
+            try:
+                # Build the command for receiving the snapshot
+                cmd = ["zfs", "recv", "-F", stream.ref.zfs_dataset_path]
+                with subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    bufsize=0) as process:
 
-                # Check that the pipe is open
-                if process.stdin is None:
-                    raise RuntimeError("Failed to open stdin for the subprocess")
+                    # Check that the pipe is open
+                    if process.stdin is None:
+                        raise RuntimeError("Failed to open stdin for the subprocess")
 
-                # write the data
-                for block in stream.snapshot_stream:
-                    process.stdin.write(block)
+                    # write the data
+                    for block in stream.snapshot_stream:
+                        process.stdin.write(block)
 
-                # flush and close the buffer
-                process.stdin.flush()
-                process.stdin.close()
+                    # flush and close the buffer
+                    process.stdin.flush()
+                    process.stdin.close()
 
-                # wait for the process to complete
-                returncode = process.wait(1)
-                if returncode:
-                    error = process.stderr.read()
-                    raise subprocess.CalledProcessError(returncode, cmd, stderr=error)
-        except subprocess.CalledProcessError as e:
-            print(e.stderr, file=sys.stderr)
-            raise
+                    # wait for the process to complete
+                    returncode = process.wait(1)
+                    if returncode:
+                        error = process.stderr.read()
+                        raise subprocess.CalledProcessError(returncode, cmd, stderr=error)
+            except subprocess.CalledProcessError as e:
+                print(e.stderr, file=sys.stderr)
+                raise
 
 
 class LineageTableNode(BaseModel):
@@ -547,12 +550,13 @@ class FileSnapshotManager:
             success_flags.extend(self.__adapter.destroy(filepaths))
         return (filepaths, success_flags)
 
-    def recv(self, stream: SnapshotStream):
+    def recv(self, streams: list[SnapshotStream]):
         """
         Receive and store a snapshot stream using the adapter.
 
         Args:
-            stream (SnapshotStream): The snapshot stream to receive.
+            streams (SnapshotStream): The snapshot streams to receive.
+                                      SnapshotStreams will be received in the order they appear in the list.
 
         Returns:
             Any: Result of the adapter's recv operation.
@@ -560,14 +564,16 @@ class FileSnapshotManager:
         Raises:
             DataIntegrityError: If the file already exists.
         """
-        # validate that we won't be overwriting an existing file
-        paths = self.__adapter.query(stream.ref.zfs_dataset_path)
-        filenames = [p.name for p in paths]
-        if stream.filename in filenames:
-            raise DataIntegrityError(f'Cannot overwrite existing file = {stream.filename}')
-
-        # write it out using the adapter
-        return self.__adapter.recv(stream)
+        filepaths = []
+        for stream in streams:
+            # validate that we won't be overwriting an existing file
+            paths = self.__adapter.query(stream.ref.zfs_dataset_path)
+            filenames = [p.name for p in paths]
+            if stream.filename in filenames:
+                raise DataIntegrityError(f'Cannot overwrite existing file = {stream.filename}')
+            # write it out using the adapter
+            filepaths.append(self.__adapter.recv(stream))
+        return filepaths
 
     def send(self, ref: SnapshotRef, chain_filter: Optional[Callable[[list[LineageTableChain]], LineageTableChain]] = None):
         """

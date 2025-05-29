@@ -309,5 +309,5 @@ class TestFileSnapshotManager(unittest.TestCase):
         adapter.query = lambda _: []
         adapter.recv = lambda _: stream.ref.zfs_dataset_path.joinpath(stream.filename)
         manager = FileSnapshotManager(adapter)
-        filename = manager.recv(stream)
-        self.assertEqual(filename, PurePath('tank/foo/20250404.zfs'))
+        filenames = manager.recv([stream])
+        self.assertEqual(filenames, [PurePath('tank/foo/20250404.zfs')])

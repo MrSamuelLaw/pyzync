@@ -52,7 +52,7 @@ class TestLocalFileLoopCheck(unittest.TestCase):
         streams.extend([HostSnapshotManager.send(ref, base)[0] for base, ref in zip(refs, refs[1:])])
 
         # send those streams to local storage
-        filepaths = [manager.recv(stream) for stream in streams]
+        filepaths = manager.recv(streams)
 
         # verify the ref is queryable now that it exists
         file_refs = manager.query()
@@ -70,7 +70,7 @@ class TestLocalFileLoopCheck(unittest.TestCase):
         ref = max(refs, key=lambda r: r.date)
         streams = manager.send(ref)
         for s, d in zip(streams, dates):
-            HostSnapshotManager.recv(s)
+            HostSnapshotManager.recv([s])
             path = Path(f'/tank0/foo/{d}.txt')
             self.assertTrue(path.exists())
 
