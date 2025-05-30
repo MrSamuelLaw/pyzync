@@ -8,8 +8,8 @@ This module provides two main manager classes for handling ZFS snapshots:
 
 import re
 import sys
-import warnings
 import subprocess
+import logging
 from datetime import date as Date
 from pathlib import PurePath
 from functools import partial
@@ -21,6 +21,9 @@ from pydantic import BaseModel, ConfigDict
 
 from pyzync.errors import DataCorruptionError, DataIntegrityError
 from pyzync.interfaces import SnapshotRef, SnapshotStream, SnapshotStorageAdapter
+
+
+logger = logging.getLogger(__name__)
 
 
 class HostSnapshotManager:
@@ -45,6 +48,7 @@ class HostSnapshotManager:
         Raises:
             subprocess.CalledProcessError: If snapshot creation fails.
         """
+        logger.info(f"Creating snapshot for {zfs_dataset_path} on {date}")
         try:
             snapshot = SnapshotRef(zfs_dataset_path=zfs_dataset_path, date=date)
             subprocess.run(
@@ -55,6 +59,7 @@ class HostSnapshotManager:
             )
             return snapshot
         except subprocess.CalledProcessError as e:
+            logger.exception(f"Failed to create snapshot for {zfs_dataset_path} on {date}")
             print(e.stderr, file=sys.stderr)
             raise
 
@@ -72,6 +77,7 @@ class HostSnapshotManager:
         Raises:
             subprocess.CalledProcessError: If snapshot query fails.
         """
+        logger.debug(f"Querying snapshots for {zfs_dataset_path}")
 
         def _from_zfs_snapshot_id(zfs_snapshot_id):
             zfs_dataset_path, date = zfs_snapshot_id.split("@")
@@ -97,6 +103,7 @@ class HostSnapshotManager:
             if (e.stderr.strip() == "no datasets available") or (e.returncode == 1):  # this indicates grep didn't find any matches
                 result: list[SnapshotRef] = []
                 return result
+            logger.exception(f"Failed to query snapshots for {zfs_dataset_path}")
             print(e.stderr, file=sys.stderr)
             raise
 
@@ -114,6 +121,7 @@ class HostSnapshotManager:
         Raises:
             subprocess.CalledProcessError: If snapshot destruction fails.
         """
+        logger.info(f"Destroying snapshot {snapshot_ref}")
         try:
             subprocess.run(
                 ["bash", "-c", f"zfs destroy -d {snapshot_ref.zfs_snapshot_id}"],
@@ -124,6 +132,7 @@ class HostSnapshotManager:
             return snapshot_ref
 
         except subprocess.CalledProcessError as e:
+            logger.exception(f"Failed to destroy snapshot {snapshot_ref}")
             print(e.stderr, file=sys.stderr)
             raise
 
@@ -149,6 +158,7 @@ class HostSnapshotManager:
             subprocess.CalledProcessError: If snapshot sending fails.
             RuntimeError: If subprocess stdout cannot be opened.
         """
+        logger.info(f"Sending snapshot {ref} (base: {base})")
 
         if (base is not None) and (base.date >= ref.date):
             raise DataIntegrityError(
@@ -182,6 +192,7 @@ class HostSnapshotManager:
                         error = process.stderr.read()
                         raise subprocess.CalledProcessError(returncode, cmd, stderr=error)
             except subprocess.CalledProcessError as e:
+                logger.exception(f"Failed to send snapshot {ref} (base: {base})")
                 print(e.stderr, file=sys.stderr)
                 raise
 
@@ -207,6 +218,7 @@ class HostSnapshotManager:
             RuntimeError: If subprocess stdin cannot be opened.
         """
         for stream in streams:
+            logger.info(f"Receiving snapshot stream for {stream}")
             try:
                 # Build the command for receiving the snapshot
                 cmd = ["zfs", "recv", "-F", stream.ref.zfs_dataset_path]
@@ -231,6 +243,7 @@ class HostSnapshotManager:
                         error = process.stderr.read()
                         raise subprocess.CalledProcessError(returncode, cmd, stderr=error)
             except subprocess.CalledProcessError as e:
+                logger.exception(f"Failed to receive snapshot stream for {stream}")
                 print(e.stderr, file=sys.stderr)
                 raise
 
@@ -324,6 +337,8 @@ class FileSnapshotManager:
         Raises:
             DataCorruptionError: If invalid incremental snapshots are found.
         """
+        
+        logger.debug(f"Computing lineage tables for filepaths: {filepaths}")
 
         # predefine the patterns used to seperate out files
         complete_pattern = re.compile(r"\d{8}.zfs")
@@ -386,7 +401,7 @@ class FileSnapshotManager:
                 if o["orphaned"]
             ]
             if orphaned_nodes:
-                warnings.warn(f'The following orphaned LineageNodes were found, {orphaned_nodes}')
+                logger.warning(f'The following orphaned LineageNodes were found for zfs_dataset_path {zfs_dataset_path}, {orphaned_nodes}')
 
             table_index = [Date.fromisoformat(d) for d in table_index]
             table = LineageTable(zfs_dataset_path=zfs_dataset_path,
@@ -507,22 +522,26 @@ class FileSnapshotManager:
             ValueError: If multiple lineage tables are found.
             DataIntegrityError: If the reference is not deletable.
         """
+        logger.info(f"Destroying snapshot files for ref {ref}")
         # query the files related to the ref
         matches = self.__adapter.query(ref.zfs_dataset_path)
         tables = self._compute_lineage_tables(matches)
 
         # if multiple lineages were found, something went wrong
         if len(tables) > 1:
-            raise ValueError(f'Multiple lineage tables found when attempting to destroy ref {ref}. '
-                             'Expected exactly one table.')
+            msg = f'Multiple lineage tables found when attempting to destroy ref {ref}. ' \
+                   'Expected exactly one table.'
+            logger.error(msg)
+            raise ValueError(msg)
 
         # ensure ref is deletable
         table = tables[0]
         if not self._is_ref_deletable(table, ref):
-            raise DataIntegrityError(
-                f'Cannot delete snapshot {ref} as it would break snapshot lineage. '
-                'Only the most recent snapshot or oldest snapshot (with complete backup) '
-                'can be deleted.')
+            msg = f'Cannot delete snapshot {ref} as it would break snapshot lineage. ' \
+                   'Only the most recent snapshot or oldest snapshot (with complete backup) ' \
+                   'can be deleted.'
+            logger.error(msg)
+            raise DataIntegrityError(msg)
         row_idx = table.index.index(ref.date)
         row = [col[row_idx] for col in table.data if col[row_idx] is not None]
         filepaths = [table.zfs_dataset_path.joinpath(v.filename) for v in row]
@@ -539,6 +558,7 @@ class FileSnapshotManager:
         Returns:
             tuple[list[PurePath], list[bool]]: Tuple of filepaths and success flags.
         """
+        logger.info(f"Pruning orphaned and redundant snapshot files for {zfs_dataset_path}")
         zfs_dataset_path = SnapshotRef.format_zfs_dataset_path(zfs_dataset_path)
         paths = self.__adapter.query(zfs_dataset_path)
         tables = self._compute_lineage_tables(paths)
@@ -566,11 +586,14 @@ class FileSnapshotManager:
         """
         filepaths = []
         for stream in streams:
+            logger.info(f"Receiving snapshot stream for {stream}")
             # validate that we won't be overwriting an existing file
             paths = self.__adapter.query(stream.ref.zfs_dataset_path)
             filenames = [p.name for p in paths]
             if stream.filename in filenames:
-                raise DataIntegrityError(f'Cannot overwrite existing file = {stream.filename}')
+                msg = f'Cannot overwrite existing file = {stream.filename}'
+                logger.error(msg)
+                raise DataIntegrityError(msg)
             # write it out using the adapter
             filepaths.append(self.__adapter.recv(stream))
         return filepaths
@@ -589,22 +612,30 @@ class FileSnapshotManager:
         Raises:
             ValueError: If multiple lineage tables are found or data for the reference is missing.
         """
+        logger.info(f"Sending snapshot stream for ref {ref}")
         # get the lineage table
         filepaths = self.__adapter.query(ref.zfs_dataset_path)
         tables = self._compute_lineage_tables(filepaths)
         if len(tables) > 1:
-            raise ValueError(f'Multiple lineage tables found when attempting to send ref {ref}. '
-                             'Expected exactly one table')
+            msg = f'Multiple lineage tables found when attempting to send ref {ref}. ' \
+                   'Expected exactly one table'
+            logger.error(msg)
+            raise ValueError(msg)
         table = tables[0]
 
         # use the table to find the lineage with the requisite ref dates
         if ref.date not in table.index:
-            raise ValueError(f'Cannot find data for SnapshotRef = {ref}')
+            msg = f'Cannot find data for SnapshotRef = {ref}'
+            logger.error(msg)
+            raise ValueError(msg)
 
         try:
             row_idx = table.index.index(ref.date)
         except ValueError as e:
-            raise ValueError(f'Unable to generate SnapshotStream for ref = {ref}')
+            msg = f'Unable to generate SnapshotStream for ref = {ref}'
+            logger.exception(msg)
+            raise ValueError(msg)
+
 
         # get all the nodes that could make the ref, capturing which column the node came from
         chains = [c for c in table.data if c[row_idx] is not None]

@@ -142,9 +142,8 @@ class TestFileSnapshotManager(unittest.TestCase):
             'test/foo/20250504.zfs', 'test/foo/20250504_20250505.zfs', 'test/foo/20250505_20250506.zfs',
             'test/bar/20250504.zfs', 'test/bar/20250505_20250506.zfs'
         ]
-        # with self.assertRaises(DataCorruptionError) as ct:
-        with self.assertWarns(Warning) as ct:
-            refs = manager.query()
+        # will log some stuff
+        refs = manager.query()
 
         # two chains and one with a newer complete snapshot
         paths = [
@@ -207,10 +206,10 @@ class TestFileSnapshotManager(unittest.TestCase):
             'tank/foo/20250125_20250126.zfs',
         ]
         paths = [PurePath(p) for p in paths]
-        with self.assertWarns(Warning) as ct:
-            tables = FileSnapshotManager._compute_lineage_tables(paths)
-            table = tables[0]
-            redundant_nodes = FileSnapshotManager._compute_redundant_nodes(table)
+        # will generate some warnings
+        tables = FileSnapshotManager._compute_lineage_tables(paths)
+        table = tables[0]
+        redundant_nodes = FileSnapshotManager._compute_redundant_nodes(table)
 
         # case 4 is an invalid version of case 3, where the earliest incremental snapshot end date
         # is prior to the earliest complete snapshot date.
@@ -225,10 +224,10 @@ class TestFileSnapshotManager(unittest.TestCase):
             'tank/foo/20250125_20250126.zfs',
         ]
         paths = [PurePath(p) for p in paths]
-        with self.assertWarns(Warning) as ct:
-            tables = FileSnapshotManager._compute_lineage_tables(paths)
-            table = tables[0]
-            redundant_nodes = FileSnapshotManager._compute_redundant_nodes(table)
+        # will generate some warning logs
+        tables = FileSnapshotManager._compute_lineage_tables(paths)
+        table = tables[0]
+        redundant_nodes = FileSnapshotManager._compute_redundant_nodes(table)
 
     def test_can_compute_deleteable_refs(self):
         # case 1
@@ -296,11 +295,10 @@ class TestFileSnapshotManager(unittest.TestCase):
         adapter.destroy = lambda x: [True] * len(x)
         manager = FileSnapshotManager(adapter)
 
-        # we should have a warning about orphaned nodes
-        with self.assertWarns(Warning) as ct:
-            file_paths, success_flags = manager.prune('tank/foo')
-            self.assertTrue(all(success_flags))
-            self.assertEqual(set(file_paths), {paths[1], paths[2]})
+        # will generate some logs
+        file_paths, success_flags = manager.prune('tank/foo')
+        self.assertTrue(all(success_flags))
+        self.assertEqual(set(file_paths), {paths[1], paths[2]})
 
     def test_can_recv(self):
         ref = SnapshotRef(date='20250404', zfs_dataset_path='tank/foo')

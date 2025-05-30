@@ -5,12 +5,14 @@ for different storage backends. Currently supports local filesystem storage.
 """
 
 import re
-from enum import Enum
+import logging
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from pyzync.interfaces import SnapshotStorageAdapter, SnapshotStream
+
+logger = logging.getLogger(__name__)
 
 
 class LocalFileSnapshotDataAdapter(SnapshotStorageAdapter, BaseModel):
@@ -43,6 +45,7 @@ class LocalFileSnapshotDataAdapter(SnapshotStorageAdapter, BaseModel):
         """
 
         # query all the .zfs files at the root and below
+        logger.debug(f"Querying snapshot files in {self.directory} for {zfs_dataset_path}")
         glob_pattern = "*.zfs" if zfs_dataset_path is None else f"**/{zfs_dataset_path}/*.zfs"
         match_pattern = re.compile(r"(\d{8}.zfs)|(\d{8}_\d{8}.zfs)")
         matches = [r for r in self.directory.rglob(glob_pattern)]
@@ -59,6 +62,7 @@ class LocalFileSnapshotDataAdapter(SnapshotStorageAdapter, BaseModel):
         Returns:
             list[bool]: List of success flags for each deletion attempt.
         """
+        logger.info(f"Destroying files: {filepaths}")
         filepaths = [self.directory.joinpath(fp) for fp in filepaths]
         success_flags = []
         for fp in filepaths:
@@ -66,6 +70,7 @@ class LocalFileSnapshotDataAdapter(SnapshotStorageAdapter, BaseModel):
                 fp.unlink()
                 success_flags.append(True)
             except FileNotFoundError as e:
+                logger.warning(f"File not found during destroy: {fp}")
                 success_flags.append(False)
         return success_flags
 
@@ -79,7 +84,7 @@ class LocalFileSnapshotDataAdapter(SnapshotStorageAdapter, BaseModel):
             Path: Absolute path to the created snapshot file.
         """
         path = self.directory.joinpath(stream.filepath)
-
+        logger.info(f"Receiving snapshot stream to {path}")
         # create the parent dirs if they don't exist
         if not path.parent.exists():
             path.parent.mkdir(parents=True)
@@ -101,6 +106,7 @@ class LocalFileSnapshotDataAdapter(SnapshotStorageAdapter, BaseModel):
             Iterable[bytes]: Iterable yielding chunks of snapshot data.
         """
         filepath = self.directory.joinpath(filepath)
+        logger.info(f"Sending snapshot file {filepath}")
 
         def _snapshot_stream():
             with open(filepath, 'rb', buffering=0) as handle:
