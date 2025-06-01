@@ -4,3 +4,4 @@ script.py
 script.ipynb
 tests/local_storage_adapter_files/
 tests/test_sync_files/
+tests/test_backup_files/
