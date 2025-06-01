@@ -2,7 +2,7 @@ import sys
 import logging
 
 from pyzync.backup import BackupConfig, backup
-from pyzync.retention_policies import RollingNDaysPolicy
+from pyzync.retention_policies import LastNDaysPolicy, LastNSnapshotsPolicy
 from pyzync.storage_adapters import LocalFileSnapshotDataAdapter
 
 if __name__ == '__main__':
@@ -25,13 +25,13 @@ if __name__ == '__main__':
     # define the backup config for each job
     backup_configs = [
         BackupConfig(zfs_dataset_path='tank0/foo',
-                     retention_policy=RollingNDaysPolicy(n_days=5),
+                     retention_policy=LastNDaysPolicy(n_days=5),
                      storage_adapters=[
                          LocalFileSnapshotDataAdapter(
                              directory='/home/samuel/documents/pyzync/tests/test_sync_files')
                      ]),
         BackupConfig(zfs_dataset_path='tank0/bar',
-                     retention_policy=RollingNDaysPolicy(n_days=2),
+                     retention_policy=LastNSnapshotsPolicy(n_days=2),
                      storage_adapters=[
                          LocalFileSnapshotDataAdapter(
                              directory='/home/samuel/documents/pyzync/tests/test_sync_files')
