@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, field_validator
 
 from pyzync.interfaces import SnapshotRef, SnapshotStorageAdapter
 from pyzync.managers import HostSnapshotManager, FileSnapshotManager
-from pyzync.retention_polcies import RetentionPolicy
+from pyzync.retention_policies import RetentionPolicy
 
 logger = logging.getLogger(__name__)
 

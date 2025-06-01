@@ -2,7 +2,7 @@ import sys
 import logging
 
 from pyzync.backup import BackupConfig, backup
-from pyzync.retention_polcies import RollingNDaysPolicy
+from pyzync.retention_policies import RollingNDaysPolicy
 from pyzync.storage_adapters import LocalFileSnapshotDataAdapter
 
 if __name__ == '__main__':
