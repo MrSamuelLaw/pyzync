@@ -1,7 +1,7 @@
 __pycache__/
 /dev
-script.py
-script.ipynb
+backup.bash
+backup.log
 tests/local_storage_adapter_files/
-tests/test_sync_files/
+tests/test_loop_checks_files/
 tests/test_backup_files/

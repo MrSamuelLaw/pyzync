@@ -10,18 +10,17 @@ import re
 import sys
 import subprocess
 import logging
-from datetime import date as Date
+from datetime import datetime as Datetime
 from pathlib import PurePath
 from functools import partial
 from textwrap import dedent
 from itertools import groupby
-from typing import Optional, Literal, Iterable, Callable
-
-from pydantic import BaseModel, ConfigDict
+from typing import Optional, Iterable, Callable, Literal
 
 from pyzync.errors import DataCorruptionError, DataIntegrityError
-from pyzync.interfaces import SnapshotRef, SnapshotStream, SnapshotStorageAdapter
-
+from pyzync.interfaces import (SnapshotRef, SnapshotStream, SnapshotStorageAdapter, LineageTableChain,
+                               LineageTableNode, LineageTable, DuplicateDetectedPolicy, DATETIME_REGEX,
+                               DATETIME_STR_LENGTH)
 
 logger = logging.getLogger(__name__)
 
@@ -34,13 +33,13 @@ class HostSnapshotManager:
     """
 
     @staticmethod
-    def create(zfs_dataset_path: PurePath, date: Date):
+    def create(zfs_dataset_path: PurePath, datetime: Datetime):
         """
         Create a new ZFS snapshot on the host system.
 
         Args:
             zfs_dataset_path (PurePath): Path to the ZFS dataset.
-            date (Date): Date to be used for the snapshot name.
+            datetime (Datetime): Datetime to be used for the snapshot name.
 
         Returns:
             SnapshotRef: Reference to the created snapshot.
@@ -48,9 +47,9 @@ class HostSnapshotManager:
         Raises:
             subprocess.CalledProcessError: If snapshot creation fails.
         """
-        logger.info(f"Creating snapshot for {zfs_dataset_path} on {date}")
+        logger.info(f"Creating snapshot for {zfs_dataset_path} on {datetime}")
         try:
-            snapshot = SnapshotRef(zfs_dataset_path=zfs_dataset_path, date=date)
+            snapshot = SnapshotRef(zfs_dataset_path=zfs_dataset_path, datetime=datetime)
             subprocess.run(
                 ["bash", "-c", f"zfs snapshot {snapshot.zfs_snapshot_id}"],
                 capture_output=True,
@@ -59,7 +58,7 @@ class HostSnapshotManager:
             )
             return snapshot
         except subprocess.CalledProcessError as e:
-            logger.exception(f"Failed to create snapshot for {zfs_dataset_path} on {date}")
+            logger.exception(f"Failed to create snapshot for {zfs_dataset_path} on {datetime}")
             print(e.stderr, file=sys.stderr)
             raise
 
@@ -81,14 +80,14 @@ class HostSnapshotManager:
 
         def _from_zfs_snapshot_id(zfs_snapshot_id):
             zfs_dataset_path, date = zfs_snapshot_id.split("@")
-            return SnapshotRef(date=date, zfs_dataset_path=zfs_dataset_path)
+            return SnapshotRef(datetime=date, zfs_dataset_path=zfs_dataset_path)
 
         try:
             if zfs_dataset_path is None:
-                regex = r"(\w|\/)+@\d{8}"
+                regex = r"(\w|\/)+@" + DATETIME_REGEX
             else:
                 zfs_dataset_path = SnapshotRef.format_zfs_dataset_path(zfs_dataset_path)
-                regex = str(zfs_dataset_path) + r"@\d{8}"
+                regex = str(zfs_dataset_path) + "@" + DATETIME_REGEX
             result = subprocess.run(
                 ["bash", "-c", f'zfs list -t snapshot -o name | grep -P "{regex}"'],
                 capture_output=True,
@@ -100,7 +99,9 @@ class HostSnapshotManager:
             return snapshots
 
         except subprocess.CalledProcessError as e:
-            if (e.stderr.strip() == "no datasets available") or (e.returncode == 1):  # this indicates grep didn't find any matches
+            if (e.stderr.strip()
+                    == "no datasets available") or (e.returncode
+                                                    == 1):  # this indicates grep didn't find any matches
                 result: list[SnapshotRef] = []
                 return result
             logger.exception(f"Failed to query snapshots for {zfs_dataset_path}")
@@ -160,7 +161,7 @@ class HostSnapshotManager:
         """
         logger.info(f"Sending snapshot {ref} (base: {base})")
 
-        if (base is not None) and (base.date >= ref.date):
+        if (base is not None) and (base.datetime >= ref.datetime):
             raise DataIntegrityError(
                 dedent("""
                     Cannot create incremental snapshots that link a newer snapshot to an older snapshot
@@ -172,6 +173,7 @@ class HostSnapshotManager:
                 # build the command
                 cmd = ["zfs", "send", *zfs_flags]
                 if base is not None:
+                    # note we only pass the part after the @ to avoid mixing datasets by accident
                     cmd.extend(["-i", base.zfs_snapshot_id.split("@")[1]])
                 cmd.append(ref.zfs_snapshot_id)
 
@@ -223,7 +225,7 @@ class HostSnapshotManager:
                 # Build the command for receiving the snapshot
                 cmd = ["zfs", "recv", "-F", stream.ref.zfs_dataset_path]
                 with subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE,
-                                    bufsize=0) as process:
+                                      bufsize=0) as process:
 
                     # Check that the pipe is open
                     if process.stdin is None:
@@ -246,64 +248,6 @@ class HostSnapshotManager:
                 logger.exception(f"Failed to receive snapshot stream for {stream}")
                 print(e.stderr, file=sys.stderr)
                 raise
-
-
-class LineageTableNode(BaseModel):
-    """Represents a node in a snapshot lineage table.
-
-    A node can represent either a complete snapshot or an incremental snapshot,
-    identified by its filename and date.
-
-    Attributes:
-        filename (str): Name of the snapshot file.
-        date (str): Date string of the snapshot.
-        node_type (Literal['complete', 'incremental']): Node type.
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    filename: str
-    date: str
-    node_type: Literal['complete', 'incremental']
-
-    def __eq__(self, other):
-        return bool(self.date == other.date)
-
-    def __hash__(self):
-        return hash(self.filename)
-
-
-type LineageTableChain = tuple[Optional[LineageTableNode], ...]
-
-
-class LineageTable(BaseModel):
-    """Represents a table of snapshot lineages.
-
-    The table is organized as a matrix where:
-    - Columns represent different backup chains/lineages.
-    - Rows represent different dates.
-    - Each cell contains either None or a LineageTableNode.
-    - Complete nodes start new columns.
-    - Incremental nodes build upon previous nodes in the same column.
-
-    Example structure:
-        Date1: [Complete, None,    None   ]
-        Date2: [Inc1,    Complete, None   ]
-        Date3: [Inc2,    Inc1,    Complete]
-
-    Attributes:
-        zfs_dataset_path (PurePath): Path to the ZFS dataset.
-        index (tuple[Date, ...]): Tuple of dates representing the row labels.
-        data (tuple[LineageTableChain, ...]): Matrix of LineageTableNodes.
-        orphaned_nodes (tuple[LineageTableNode, ...]): Nodes not belonging to any valid lineage.
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    zfs_dataset_path: PurePath
-    index: tuple[Date, ...]
-    data: tuple[LineageTableChain, ...]
-    orphaned_nodes: tuple[LineageTableNode, ...]
 
 
 class FileSnapshotManager:
@@ -337,12 +281,12 @@ class FileSnapshotManager:
         Raises:
             DataCorruptionError: If invalid incremental snapshots are found.
         """
-        
+
         logger.debug(f"Computing lineage tables for filepaths: {filepaths}")
 
         # predefine the patterns used to seperate out files
-        complete_pattern = re.compile(r"\d{8}.zfs")
-        incremental_pattern = re.compile(r"\d{8}_\d{8}.zfs")
+        complete_pattern = re.compile(f"{DATETIME_REGEX}.zfs")
+        incremental_pattern = re.compile(f"{DATETIME_REGEX}_{DATETIME_REGEX}.zfs")
 
         # build out lineages using the tips
         lineage_tables: list[LineageTable] = []
@@ -362,48 +306,58 @@ class FileSnapshotManager:
             # for the incrementals, cache if they've been used or not so we can identify orphans later
             incremental_files = [{"name": n, "orphaned": True} for n in incremental_files]
 
+            # name the slices for easier maintenance
+            left_slice = slice(0, DATETIME_STR_LENGTH)
+            right_slice = slice(DATETIME_STR_LENGTH + 1, (2 * DATETIME_STR_LENGTH) + 1)
+
             # build out the lineages for each complete snapshot
-            table_index: set[Date] = set()
+            table_index: set[Datetime] = set()
             table_data: list[list[Optional[LineageTableNode]]] = []
             for filename in complete_files:
                 # start with a complete node
-                lineage = [LineageTableNode(filename=filename, date=filename[:8], node_type='complete')]
-                table_index.add(lineage[-1].date)
+                lineage = [
+                    LineageTableNode(filename=filename,
+                                     datetime=filename[left_slice],
+                                     node_type='complete')
+                ]
+                table_index.add(lineage[-1].datetime)
                 # join incremental nodes in order
                 for incremental_file in incremental_files:
                     filename = incremental_file["name"]
-                    if filename[0:8] >= filename[9:17]:
+                    if filename[left_slice] >= filename[right_slice]:
                         raise DataCorruptionError(
                             f'Incremental snapshot that increments back in time found with filename = {filename}'
                         )
-                    if lineage[-1].date == filename[:8]:
+                    elif lineage[-1].datetime == filename[left_slice]:
                         incremental_file["orphaned"] = False
                         lineage.append(
                             LineageTableNode(filename=filename,
-                                             date=filename[9:17],
+                                             datetime=filename[right_slice],
                                              node_type='incremental'))
-                        table_index.add(lineage[-1].date)
+                        table_index.add(lineage[-1].datetime)
                 table_data.append(lineage)
 
             # using the index created in the previous loops build out a table structure
             table_index = sorted(list(table_index))
             for i, lineage in enumerate(table_data):
                 column = [None] * len(table_index)
-                lineage_map = {node.date: node for node in lineage}
-                for j, date in enumerate(table_index):
-                    column[j] = lineage_map.get(date)
+                lineage_map = {node.datetime: node for node in lineage}
+                for j, datetime in enumerate(table_index):
+                    column[j] = lineage_map.get(datetime)
                 table_data[i] = column
 
             # create orphaned nodes
             orphaned_nodes = [
-                LineageTableNode(filename=o['name'], date=o['name'][9:17], node_type='incremental')
-                for o in incremental_files
-                if o["orphaned"]
+                LineageTableNode(filename=o['name'],
+                                 datetime=o['name'][right_slice],
+                                 node_type='incremental') for o in incremental_files if o["orphaned"]
             ]
             if orphaned_nodes:
-                logger.warning(f'The following orphaned LineageNodes were found for zfs_dataset_path {zfs_dataset_path}, {orphaned_nodes}')
+                logger.warning(
+                    f'The following orphaned LineageNodes were found for zfs_dataset_path {zfs_dataset_path}, {orphaned_nodes}'
+                )
 
-            table_index = [Date.fromisoformat(d) for d in table_index]
+            table_index = [Datetime.fromisoformat(d) for d in table_index]
             table = LineageTable(zfs_dataset_path=zfs_dataset_path,
                                  index=table_index,
                                  data=table_data,
@@ -425,10 +379,10 @@ class FileSnapshotManager:
         Returns:
             list[SnapshotRef]: List of snapshot references.
         """
-        refs: list[LineageTableNode] = []
+        refs: list[SnapshotRef] = []
         for table in lineage_tables:
             for date in table.index:
-                refs.append(SnapshotRef(date=date, zfs_dataset_path=table.zfs_dataset_path))
+                refs.append(SnapshotRef(datetime=date, zfs_dataset_path=table.zfs_dataset_path))
         return refs
 
     def query(self, zfs_dataset_path: Optional[PurePath] = None):
@@ -498,17 +452,18 @@ class FileSnapshotManager:
             ValueError: If zfs_dataset_path does not match.
         """
         if table.zfs_dataset_path != ref.zfs_dataset_path:
-            raise ValueError('zfs_dataset_path for LineageTable must match zfs_dataset_path for SnapshotRef')
+            raise ValueError(
+                'zfs_dataset_path for LineageTable must match zfs_dataset_path for SnapshotRef')
 
-        if ref.date == table.index[-1]:
+        if ref.datetime == table.index[-1]:
             return True
-        elif ref.date == table.index[0] and len(table.index) > 1:
+        elif ref.datetime == table.index[0] and len(table.index) > 1:
             # there must be a complete node in row 1
             return bool(
                 [c[1] for c in table.data if (c[1] is not None) and (c[1].node_type == 'complete')])
         return False
 
-    def destroy(self, ref: SnapshotRef):
+    def destroy(self, ref: SnapshotRef, force: bool = False, dryrun: bool = False):
         """
         Destroy snapshot files related to the given reference, ensuring lineage is not broken.
 
@@ -536,16 +491,19 @@ class FileSnapshotManager:
 
         # ensure ref is deletable
         table = tables[0]
-        if not self._is_ref_deletable(table, ref):
+        if not (force or self._is_ref_deletable(table, ref)):
             msg = f'Cannot delete snapshot {ref} as it would break snapshot lineage. ' \
                    'Only the most recent snapshot or oldest snapshot (with complete backup) ' \
                    'can be deleted.'
             logger.error(msg)
             raise DataIntegrityError(msg)
-        row_idx = table.index.index(ref.date)
+        row_idx = table.index.index(ref.datetime)
         row = [col[row_idx] for col in table.data if col[row_idx] is not None]
         filepaths = [table.zfs_dataset_path.joinpath(v.filename) for v in row]
-        success_flags = self.__adapter.destroy(filepaths)
+        if not dryrun:
+            success_flags = self.__adapter.destroy(filepaths)
+        else:
+            success_flags = [True] * len(filepaths)
         return (filepaths, success_flags)
 
     def prune(self, zfs_dataset_path: PurePath):
@@ -570,7 +528,10 @@ class FileSnapshotManager:
             success_flags.extend(self.__adapter.destroy(filepaths))
         return (filepaths, success_flags)
 
-    def recv(self, streams: list[SnapshotStream]):
+    def recv(self,
+             streams: list[SnapshotStream],
+             dryrun: bool = False,
+             on_duplicate_detected: DuplicateDetectedPolicy = 'error'):
         """
         Receive and store a snapshot stream using the adapter.
 
@@ -591,14 +552,24 @@ class FileSnapshotManager:
             paths = self.__adapter.query(stream.ref.zfs_dataset_path)
             filenames = [p.name for p in paths]
             if stream.filename in filenames:
-                msg = f'Cannot overwrite existing file = {stream.filename}'
-                logger.error(msg)
-                raise DataIntegrityError(msg)
+                if on_duplicate_detected == 'error':
+                    msg = f'Cannot overwrite existing file = {stream.filename}'
+                    logger.error(msg)
+                    raise FileExistsError(msg)
+                elif on_duplicate_detected == 'ignore':
+                    continue
+                elif on_duplicate_detected == 'overwrite':
+                    pass
             # write it out using the adapter
-            filepaths.append(self.__adapter.recv(stream))
+            if not dryrun:
+                filepaths.append(self.__adapter.recv(stream))
+            else:
+                filepaths.append(stream.filepath)
         return filepaths
 
-    def send(self, ref: SnapshotRef, chain_filter: Optional[Callable[[list[LineageTableChain]], LineageTableChain]] = None):
+    def send(self,
+             ref: SnapshotRef,
+             chain_filter: Optional[Callable[[list[LineageTableChain]], LineageTableChain]] = None):
         """
         Generate SnapshotStreams for the given snapshot reference using the adapter.
 
@@ -624,18 +595,17 @@ class FileSnapshotManager:
         table = tables[0]
 
         # use the table to find the lineage with the requisite ref dates
-        if ref.date not in table.index:
+        if ref.datetime not in table.index:
             msg = f'Cannot find data for SnapshotRef = {ref}'
             logger.error(msg)
             raise ValueError(msg)
 
         try:
-            row_idx = table.index.index(ref.date)
+            row_idx = table.index.index(ref.datetime)
         except ValueError as e:
             msg = f'Unable to generate SnapshotStream for ref = {ref}'
             logger.exception(msg)
             raise ValueError(msg)
-
 
         # get all the nodes that could make the ref, capturing which column the node came from
         chains = [c for c in table.data if c[row_idx] is not None]
@@ -647,7 +617,7 @@ class FileSnapshotManager:
         for node in (n for n in chain[:row_idx + 1] if n is not None):
             filepath = table.zfs_dataset_path.joinpath(node.filename)
             snapshot_stream = self.__adapter.send(filepath)
-            ref = SnapshotRef(date=node.date, zfs_dataset_path=table.zfs_dataset_path)
+            ref = SnapshotRef(datetime=node.datetime, zfs_dataset_path=table.zfs_dataset_path)
             base = streams[-1].ref if node.node_type == 'incremental' else None
             streams.append(SnapshotStream(ref=ref, base=base, snapshot_stream=snapshot_stream))
         return streams

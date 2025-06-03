@@ -10,7 +10,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-from pyzync.interfaces import SnapshotStorageAdapter, SnapshotStream
+from pyzync.interfaces import SnapshotStorageAdapter, SnapshotStream, DuplicateDetectedPolicy, DATETIME_REGEX
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ class LocalFileSnapshotDataAdapter(SnapshotStorageAdapter, BaseModel):
         # query all the .zfs files at the root and below
         logger.debug(f"Querying snapshot files in {self.directory} for {zfs_dataset_path}")
         glob_pattern = "*.zfs" if zfs_dataset_path is None else f"**/{zfs_dataset_path}/*.zfs"
-        match_pattern = re.compile(r"(\d{8}.zfs)|(\d{8}_\d{8}.zfs)")
+        match_pattern = re.compile(f"({DATETIME_REGEX}.zfs)|({DATETIME_REGEX}_{DATETIME_REGEX}.zfs)")
         matches = [r for r in self.directory.rglob(glob_pattern)]
         matches = [r for r in self.directory.rglob(glob_pattern) if match_pattern.fullmatch(r.name)]
         matches = [r.relative_to(self.directory) for r in matches]
@@ -88,7 +88,6 @@ class LocalFileSnapshotDataAdapter(SnapshotStorageAdapter, BaseModel):
         # create the parent dirs if they don't exist
         if not path.parent.exists():
             path.parent.mkdir(parents=True)
-
         # open the file and write the stream in
         with open(path, 'wb') as handle:
             for chunk in stream.snapshot_stream:

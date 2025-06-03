@@ -1,8 +1,8 @@
 import sys
 import logging
 
-from pyzync.backup import BackupConfig, backup
-from pyzync.retention_policies import LastNDaysPolicy, LastNSnapshotsPolicy
+from pyzync.backup import BackupJob, BackupConfig
+from pyzync.retention_policies import LastNSnapshotsPolicy
 from pyzync.storage_adapters import LocalFileSnapshotDataAdapter
 
 if __name__ == '__main__':
@@ -23,18 +23,17 @@ if __name__ == '__main__':
     root_logger.addHandler(stderr_handler)
 
     # define the backup config for each job
-    backup_configs = [
-        BackupConfig(zfs_dataset_path='tank0/foo',
-                     retention_policy=LastNDaysPolicy(n_days=5),
-                     storage_adapters=[
-                         LocalFileSnapshotDataAdapter(
-                             directory='/home/samuel/documents/pyzync/tests/test_sync_files')
-                     ]),
-        BackupConfig(zfs_dataset_path='tank0/bar',
-                     retention_policy=LastNSnapshotsPolicy(n_days=2),
-                     storage_adapters=[
-                         LocalFileSnapshotDataAdapter(
-                             directory='/home/samuel/documents/pyzync/tests/test_sync_files')
-                     ])
-    ]
-    backup(backup_configs)
+    job = BackupJob(
+        backup_configs = [
+            BackupConfig(
+                zfs_dataset_path='tank0/bar',
+                retention_policy=LastNSnapshotsPolicy(n_snapshots=5),
+                adapters=[
+                    LocalFileSnapshotDataAdapter(
+                        directory='/home/samuel/documents/pyzync/tests/test_backup_files'
+                    )
+                ]
+            )
+        ]
+    )
+    job.backup(on_duplicate_detected='error', force=False, dryrun=False)
