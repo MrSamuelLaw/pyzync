@@ -3,5 +3,5 @@ __pycache__/
 backup.bash
 backup.log
 tests/local_storage_adapter_files/
-tests/test_loop_checks_files/
+tests/test_loop_check_files/
 tests/test_backup_files/

@@ -1,14 +1,12 @@
-"""
-This file is used to test the app as a whole, where it interfaces directly with the host.
-The host is expeted to have two datasets named test0/foo and test0/bar.
-"""
-
 import unittest
-from datetime import datetime as Datetime
-from pathlib import Path, PurePath
+import shutil
+from pathlib import Path
 
-from pyzync.managers import HostSnapshotManager, FileSnapshotManager
-from pyzync.storage_adapters import LocalFileSnapshotDataAdapter
+from pyzync.host import HostSnapshotManager
+from pyzync.retention_policies import LastNSnapshotsPolicy
+from pyzync.interfaces import SnapshotGraph, Datetime
+from pyzync.storage_adapters import FileSnapshotManager, LocalFileStorageAdapter
+from pyzync.backup import BackupJob
 
 
 class TestLocalFileLoopCheck(unittest.TestCase):
@@ -20,21 +18,22 @@ class TestLocalFileLoopCheck(unittest.TestCase):
 
         # get an instance of the adapter
         directory = Path(__file__).resolve().parent
-        directory = directory.joinpath('local_storage_adapter_files')
-        adapter = LocalFileSnapshotDataAdapter(directory=directory)
-        manager = FileSnapshotManager(adapter)
+        directory = directory.joinpath('test_loop_check_files')
+        adapter = LocalFileStorageAdapter(directory=directory)
+        manager = FileSnapshotManager(adapter=adapter)
 
         # clean up any lingering files
-        refs = manager.query()
-        refs = sorted(refs, key=lambda r: r.datetime, reverse=True)
-        [manager.destroy(r) for r in refs]
+        dataset_id = 'tank0/foo'
+        graphs = manager.query(dataset_id)
+        remote_graph = graphs[0] if graphs else SnapshotGraph(dataset_id=dataset_id)
+        [manager.destroy(n, remote_graph, force=True) for n in remote_graph.get_nodes()]
 
         # query snapshots that are related to the file system
-        zfs_root = PurePath("tank0/foo")
-        refs = HostSnapshotManager.query(zfs_root)
-        [HostSnapshotManager.destroy(ref) for ref in refs]
+        graphs = HostSnapshotManager.query(dataset_id)
+        host_graph = graphs[0] if graphs else SnapshotGraph(dataset_id=dataset_id)
+        [HostSnapshotManager.destroy(node, host_graph) for node in host_graph.get_nodes()]
 
-        # case 1 from the node_diagram
+        # # case 1 from the node_diagram
         datetimes = [
             '20250122T120000',
             '20250123T120000',
@@ -42,43 +41,101 @@ class TestLocalFileLoopCheck(unittest.TestCase):
             '20250125T120000',
             '20250126T120000',
         ]
-        refs = []
         # add a fake file for testing for each date
-        for d in datetimes:
-            path = Path(f'/tank0/foo/{d}.txt')
+        nodes = []
+        for dt in datetimes:
+            path = Path(f'/tank0/foo/{dt}.txt')
             path.touch(exist_ok=True)
-            refs.append(HostSnapshotManager.create(zfs_root, d))
+            nodes.append(HostSnapshotManager.create(dt, host_graph))
             path.unlink()
 
         # create the first complete stream
-        streams = HostSnapshotManager.send(refs[0])
+        chain = sorted(list(host_graph.get_nodes()), key=lambda node: node.dt)
+        streams = [HostSnapshotManager.send(chain[0].dt, host_graph)]
 
         # create the incremental streams
-        streams.extend([HostSnapshotManager.send(ref, base)[0] for base, ref in zip(refs, refs[1:])])
+        streams.extend(
+            [HostSnapshotManager.send(n.dt, host_graph, p.dt) for n, p in zip(chain[1:], chain)])
 
         # send those streams to local storage
-        filepaths = manager.recv(streams)
+        [manager.recv(stream, remote_graph) for stream in streams]
 
         # verify the ref is queryable now that it exists
-        file_refs = manager.query()
-        self.assertEqual(set(refs), set(file_refs))
+        graph = manager.query(dataset_id)[0]
+        self.assertEqual(graph.get_nodes(), remote_graph.get_nodes())
 
         # destroy the snapshots from the host
-        [HostSnapshotManager.destroy(ref) for ref in refs]
+        [HostSnapshotManager.destroy(node, host_graph) for node in chain]
 
         # verify that the dataset is empty
         path = Path('/tank0/foo')
         self.assertFalse(any(path.iterdir()))
 
         # restore the files in order and check that the directory contains the file expected
-        refs = manager.query()
-        ref = max(refs, key=lambda r: r.datetime)
-        streams = manager.send(ref)
-        for s, d in zip(streams, datetimes):
-            HostSnapshotManager.recv([s])
-            path = Path(f'/tank0/foo/{d}.txt')
+        chain = remote_graph.get_chains()[0]
+        streams = [manager.send(n, remote_graph) for n in chain]
+        for stream, dt in zip(streams, datetimes):
+            HostSnapshotManager.recv(stream, host_graph, zfs_args=['-F'])
+            path = Path(f'/tank0/foo/{dt}.txt')
             self.assertTrue(path.exists())
 
         # verify that every snapshot was received
         path = Path(f'/tank0/foo/{datetimes[-1]}.txt')
         self.assertTrue(path.exists())
+        path.unlink()
+
+    def test_can_use_backup_job(self):
+        # define the backup config for each job
+        directory = Path(__file__).resolve().parent
+        directory = directory.joinpath('test_loop_check_files')
+
+        # destroy the backups that exist in the directory already
+        for f in directory.iterdir():
+            if f.is_file():
+                f.unlink()
+            elif f.is_dir():
+                shutil.rmtree(f)
+
+        # setup a backup config
+        config = {
+            'tank0/bar':
+                BackupJob(retention_policy=LastNSnapshotsPolicy(n_snapshots=5),
+                          adapters=[LocalFileStorageAdapter(directory=directory)])
+        }
+
+        # destroy all nodes from host
+        graphs = HostSnapshotManager.query('tank0/bar')
+        host_graph = graphs[0] if graphs else SnapshotGraph(dataset_id='tank0/bar')
+        [HostSnapshotManager.destroy(node, host_graph) for node in host_graph.get_nodes()]
+
+        # perform a rotate and run each job
+        datetimes = [
+            '20250101T120000',
+            '20250101T120001',
+            '20250101T120002',
+            '20250101T120003',
+            '20250101T120004',
+        ]
+        datetimes = [Datetime(dt) for dt in datetimes]
+        for dataset_id, job in config.items():
+            for dt in datetimes:
+                job.rotate(dataset_id, dt=dt)
+                job.sync(dataset_id)
+
+        # verify the expected files exist
+        dataset_id = 'tank0/bar'
+        # Check host snapshots
+        host_graphs = HostSnapshotManager.query(dataset_id)
+        self.assertTrue(host_graphs)
+        host_graph = host_graphs[0]
+        host_dts = sorted([n.dt for n in host_graph.get_nodes()])
+        self.assertEqual(host_dts, datetimes)
+
+        # Check backup snapshots in storage
+        adapter = LocalFileStorageAdapter(directory=directory)
+        manager = FileSnapshotManager(adapter=adapter)
+        backup_graphs = manager.query(dataset_id)
+        self.assertTrue(backup_graphs)
+        backup_graph = backup_graphs[0]
+        backup_dts = sorted([n.dt for n in backup_graph.get_nodes()])
+        self.assertEqual(backup_dts, datetimes)

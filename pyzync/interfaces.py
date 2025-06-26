@@ -1,23 +1,15 @@
-"""Core interfaces and data models for managing ZFS snapshots.
-
-This module defines the fundamental interfaces and data structures used throughout
-the pyzync package for representing and managing ZFS snapshots and their data streams.
-"""
-
 import re
-from abc import ABC, abstractmethod
 from pathlib import PurePath
-from datetime import datetime as Datetime
-from typing import Self, Iterable, Optional, Literal
+from itertools import chain
+from collections import defaultdict
+from abc import ABC, abstractmethod
+from datetime import datetime, tzinfo
+from typing import Self, Iterable, Optional, Literal, overload, Any
 
-from pydantic import (
-    BaseModel,
-    Field,
-    model_validator,
-    field_validator,
-    computed_field,
-    ConfigDict,
-)
+from pydantic import (BaseModel, Field, BeforeValidator, model_validator, field_validator,
+                      computed_field, ConfigDict, GetCoreSchemaHandler, validate_call)
+from pydantic_core import CoreSchema, core_schema
+
 
 DATETIME_FORMAT = r"%Y%m%dT%H%M%S"
 DATETIME_REGEX = r'\d{8}T\d{6}'
@@ -26,208 +18,259 @@ DATETIME_STR_LENGTH = len('yyyymmddThhmmss')
 DuplicateDetectedPolicy = Literal['error', 'ignore', 'overwrite']
 
 
-class SnapshotRef(BaseModel):
-    """Reference to a ZFS snapshot with datetime and filesystem path information.
+class Datetime(datetime):
 
-    Attributes:
-        datetime (Datetime): The date/time of the snapshot
-        zfs_dataset_path (PurePath): The ZFS filesystem path (e.g., "tank/data").
-    """
+    @overload
+    def __new__(cls, iso_string: str) -> Self:
+        pass
+
+    @overload
+    def __new__(cls, dt: datetime) -> Self:
+        pass
+
+    @overload
+    def __new__(cls,
+                year: int,
+                month: int,
+                day: int,
+                hour: int = 0,
+                minute: int = 0,
+                second: int = 0,
+                microsecond: int = 0,
+                tzinfo: Optional[tzinfo] = None,
+                *,
+                fold: Literal[0, 1] = 0):
+        pass
+
+    def __new__(cls, *args, **kwargs):
+        if (len(args) == 1):
+            if (type(args[0]) == str):
+                iso_string = args[0]
+                return cls.fromisoformat(iso_string)
+            elif (type(args[0]) == datetime):
+                dt = args[0]
+                return datetime.__new__(cls,
+                                        dt.year,
+                                        dt.month,
+                                        dt.day,
+                                        dt.hour,
+                                        dt.minute,
+                                        dt.second,
+                                        tzinfo=dt.tzinfo,
+                                        fold=dt.fold)
+        else:
+            return datetime.__new__(cls, *args, **kwargs)
+
+    def __str__(self):
+        return self.strftime(DATETIME_FORMAT)
+
+    @classmethod
+    def __get_pydantic_core_schema__(cls, _: Any, handler: GetCoreSchemaHandler) -> CoreSchema:
+        return core_schema.union_schema([
+            core_schema.no_info_after_validator_function(cls, handler(str)),
+            core_schema.no_info_after_validator_function(cls, handler(datetime)),
+            core_schema.is_instance_schema(cls)
+        ])
+
+
+class ZfsDatasetId(str):
+    
+    _pattern = re.compile(r"(\w)+(\w|\/)+")
+
+    def __new__(cls, path: str):
+        if not cls._pattern.fullmatch(path):
+            raise ValueError("ZfsDatasetPath must not start with '.' or '/'")
+        return str.__new__(cls, path)
+
+    @classmethod
+    def __get_pydantic_core_schema__(cls, _: Any, handler: GetCoreSchemaHandler) -> CoreSchema:
+        return core_schema.no_info_after_validator_function(cls, handler(str))
+
+
+class ZfsSnapshotId(str):
+    
+    _pattern = re.compile(r"(\w)+(\w|\/)+(@{inj})".format(inj=DATETIME_REGEX))
+
+    def __new__(cls, snapshot_id):
+        if not cls._pattern.fullmatch(snapshot_id):
+            raise ValueError(f"ZfsSnapshotId = {snapshot_id} is not valid")
+        return str.__new__(cls, snapshot_id)
+
+    @classmethod
+    def __get_pydantic_core_schema__(cls, _: Any, handler: GetCoreSchemaHandler) -> CoreSchema:
+        return core_schema.no_info_after_validator_function(cls, handler(str))
+
+
+class ZfsFilePath(str):
+    
+    _pattern = re.compile(r"(\w)+(\w|\/)+(({inj})|({inj}_{inj})).zfs".format(inj=DATETIME_REGEX))
+    _dt_pattern = re.compile(DATETIME_REGEX)
+
+    def __new__(cls, path):
+        if not cls._pattern.fullmatch(path):
+            raise ValueError(f"ZfsFilePath = {path} is not valid")
+
+        dts = cls._dt_pattern.findall(path)
+        dts = [Datetime(dt) for dt in dts]
+        
+        return str.__new__(cls, path)
+
+    @classmethod
+    def __get_pydantic_core_schema__(cls, _: Any, handler: GetCoreSchemaHandler) -> CoreSchema:
+        return core_schema.no_info_after_validator_function(cls, handler(str))
+
+
+SnapshotNodeType = Literal['complete', 'incremental']
+
+
+class SnapshotNode(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    datetime: Datetime
-    zfs_dataset_path: PurePath
-
-    def __eq__(self, other: Self):
-        return self.zfs_snapshot_id == other.zfs_snapshot_id
+    dt: Datetime
+    parent_dt: Optional[Datetime] = None
+    dataset_id: ZfsDatasetId
     
-    def __str__(self):
-        return str(self.zfs_snapshot_id)
-
-    @field_validator("datetime", mode="before")
-    @classmethod
-    def convert_date(cls, value: str | Datetime) -> Datetime:
-        if isinstance(value, str):
-            return Datetime.fromisoformat(value)
-        elif isinstance(value, Datetime):
-            return value
-        raise TypeError(f"Unable to coerce value = {value} to datetime.datetime")
-
-    @field_validator("zfs_dataset_path", mode="before")
-    @classmethod
-    def format_zfs_dataset_path(cls, value: str | PurePath):
-        value = str(value)
-        if re.fullmatch(r"(\w)+(\w|\/)+", value):
-            return PurePath(value)
-        raise ValueError("root must not start with '/' or '.'")
-
-    @computed_field()
-    def zfs_snapshot_id(self) -> str:
-        """Returns the ZFS snapshot identifier in the format <dataset>@<YYYYMMDDTHHmmss>."""
-        return f'{str(self.zfs_dataset_path)}@{self.datetime.strftime(DATETIME_FORMAT)}'
-
-
-class SnapshotStream(BaseModel):
-    """Represents a stream of snapshot data, either complete or incremental.
-
-    Wraps snapshot data and metadata about the source snapshot and, for incrementals,
-    the base snapshot.
-
-    Attributes:
-        ref (SnapshotRef): The snapshot being streamed.
-        snapshot_stream (Iterable[bytes]): The actual snapshot data stream.
-        base (Optional[SnapshotRef]): For incremental streams, the base snapshot.
-    """
-
-    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
-
-    ref: SnapshotRef
-    base: Optional[SnapshotRef] = Field(None)
-    snapshot_stream: Iterable[bytes]
-    
-    def __str__(self):
-        return str(self.filepath)
-
-    @model_validator(mode="after")
-    def validate_snapshot_refs(self):
-        """Validates that the ref and base have the same zfs_root."""
-        if (self.base is not None) and (self.base.zfs_dataset_path != self.ref.zfs_dataset_path):
-            raise ValueError("ref and base must have matching zfs_root")
+    @model_validator(mode='after')
+    def validate_data(self):
+        if (self.parent_dt is not None) and (self.parent_dt >= self.dt):
+            raise ValueError('SnapshotNode.parent_dt must be less than self.dt.' \
+                             f'\n found older parent_dt on SnapshotNode = {self}.')
         return self
 
     @computed_field
     @property
-    def filename(self) -> str:
-        """Returns the filename for the snapshot data, based on the snapshot date(s)."""
-        if self.base is None:
-            filename = f'{self.ref.datetime.strftime(DATETIME_FORMAT)}.zfs'
-        else:
-            filename = f'{self.base.datetime.strftime(DATETIME_FORMAT)}_{self.ref.datetime.strftime(DATETIME_FORMAT)}.zfs'
-        return filename
+    def node_type(self) -> SnapshotNodeType:
+        return 'complete' if self.parent_dt is None else 'incremental'
 
     @computed_field
     @property
-    def filepath(self) -> PurePath:
-        """Returns the relative filepath (including filename) for the snapshot data."""
-        return self.ref.zfs_dataset_path.joinpath(self.filename)
+    def snapshot_id(self) -> ZfsSnapshotId:
+        return ZfsSnapshotId(f'{self.dataset_id}@{self.dt}')
+
+    @computed_field
+    @property
+    def filepath(self) -> ZfsFilePath:
+        if self.parent_dt is not None:
+            filepath = f'{self.dataset_id}/{self.parent_dt}_{self.dt}.zfs'
+        else:
+            filepath = f'{self.dataset_id}/{self.dt}.zfs'
+        return ZfsFilePath(filepath)
+
+    def __str__(self):
+        return self.filepath
+    
+    def __hash__(self):
+        return hash(self.filepath)
+
+    @classmethod
+    @validate_call
+    def from_zfs_snapshot_id(cls, snapshot_id: ZfsSnapshotId):
+        dataset_id, dt = snapshot_id.split('@')
+        return cls(dataset_id=dataset_id, dt=dt)
+    
+    @classmethod
+    @validate_call
+    def from_zfs_filepath(cls, filepath: ZfsFilePath):
+        parts = filepath.split('/')
+        dataset_id = '/'.join(parts[:-1])
+        name = parts[-1]
+        dates = filepath._dt_pattern.findall(name)
+        node = cls(
+            dataset_id = dataset_id,
+            dt = dates[-1],
+            parent_dt = dates[0] if len(dates) == 2 else None
+        )
+        return node
+    
+
+type SnapshotChain = list[Optional[SnapshotNode]] 
+
+
+class SnapshotGraph(BaseModel):
+
+    model_config = ConfigDict(frozen=True)
+
+    dataset_id: ZfsDatasetId
+    _table: defaultdict[Datetime, set[SnapshotNode]] = defaultdict(set)
+
+    def get_nodes(self):
+        return set(chain(*self._table.values()))
+
+    def get_orphans(self):
+        # get the chains as a flat set
+        chains = self.get_chains()
+        chained_nodes = set(chain(*chains))
+        # get all the nodes as a flat set
+        nodes = self.get_nodes()
+        # orphaned nodes are all nodes not found in a chain
+        orphans = nodes - chained_nodes
+        return orphans
+    
+    def get_chains(self):
+        # pop the biggest group as the starting point, since that will be how many lineages there will be.
+        nodes = self.get_nodes()
+        _chains = [[n] for n in nodes if n.node_type == 'complete']
+        nodes = {n for n in nodes if n .node_type == 'incremental'}
+        i = 0
+        chains: list[SnapshotChain] = []
+        while i < 1024 and _chains:
+            i += 1
+            # pop the chain and find all the children of the tip node
+            chain_ = _chains.pop()
+            tip = chain_[-1]
+            children = {n for n in nodes if n.parent_dt == tip.dt}
+            # the chain will split if we have multiple children
+            if children:
+                for child in children:
+                    _chains.append([c for c in chain_] + [child])
+            else:
+                chains.append(chain_)
+        return chains
+    
+    def add(self, node: SnapshotNode) -> None:
+        if node.dataset_id != self.dataset_id:
+            raise ValueError(f'Failed to add node = {node} to table, node & table have different dataset_ids.')
+        group = self._table[node.dt]
+        if node in group:
+            raise ValueError(f'Cannot add duplicate node = {node}')
+        group.add(node)
+
+    def remove(self, node: SnapshotNode):
+        try:
+            group = self._table[node.dt]
+            group.remove(node)
+            if not group:
+                del self._table[node.dt]
+        except KeyError:
+            raise ValueError(f'Unable to remove node = {node}, it does not exist in the graph')
+
+
+class SnapshotStream(BaseModel):
+    
+    model_config = ConfigDict(frozen=True)
+
+    node: SnapshotNode
+    bytes_stream: Iterable[bytes]
+    
+    def __str__(self):
+        return f"SnapshotStream(node={self.node.snapshot_id}, filepath={self.node.filepath})"
 
 
 class SnapshotStorageAdapter(ABC):
-    """Abstract interface for storing and retrieving snapshot data.
-
-    Implementations must handle both complete and incremental snapshots.
-    """
 
     @abstractmethod
-    def query(zfs_dataset_path: PurePath) -> list[PurePath]:
-        """Query for stored snapshots matching the given ZFS prefix.
-
-        Args:
-            zfs_dataset_path: The ZFS filesystem path to query snapshots for.
-
-        Returns:
-            List of paths to stored snapshot data files.
-        """
+    def query(dataset_id: Optional[ZfsDatasetId]) -> list[SnapshotGraph]:
         pass
 
     @abstractmethod
-    def destroy(filepaths: list[PurePath]) -> list[bool]:
-        """Remove stored snapshot data files.
-
-        Args:
-            filepaths: List of paths to snapshot files to delete.
-            dryrun: If true, do not actually delete the file.
-
-        Returns:
-            List of boolean success flags, one per input path.
-        """
+    def destroy(node: SnapshotNode):
         pass
 
     @abstractmethod
-    def recv(stream: SnapshotStream) -> PurePath:
-        """Store a snapshot data stream.
-
-        Args:
-            stream: The snapshot stream to store.
-            dryrun: don't actually receive the data,
-            on_duplicate_detected: how to handle the stream if it would result in a duplicate file.
-
-        Returns:
-            Path where the snapshot data was stored.
-        """
+    def send(filepath: ZfsFilePath, blocksize: int = 4096) -> SnapshotStream:
         pass
-
-    @abstractmethod
-    def send(filepath: PurePath, blocksize: int = 4096) -> Iterable[bytes]:
-        """Read stored snapshot data as a stream.
-
-        Args:
-            filepath: Path to snapshot file to read.
-            blocksize: Size of chunks to read.
-
-        Returns:
-            Iterator[bytes], yielding the data for a single snapshot in chunks.
-        """
-        pass
-
-
-class LineageTableNode(BaseModel):
-    """Represents a node in a snapshot lineage table.
-
-    A node can represent either a complete snapshot or an incremental snapshot,
-    identified by its filename and date.
-
-    Attributes:
-        filename (str): Name of the snapshot file.
-        datetime (str): Datetime string of the snapshot.
-        node_type (Literal['complete', 'incremental']): Node type.
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    filename: str
-    datetime: str
-    node_type: Literal['complete', 'incremental']
     
-    def __str__(self):
-        return self.filename
-
-    def __eq__(self, other):
-        return bool(self.date == other.date)
-
-    def __hash__(self):
-        return hash(self.filename)
-
-
-type LineageTableChain = tuple[Optional[LineageTableNode], ...]
-
-
-class LineageTable(BaseModel):
-    """Represents a table of snapshot lineages.
-
-    The table is organized as a matrix where:
-    - Columns represent different backup chains/lineages.
-    - Rows represent different datetimes.
-    - Each cell contains either None or a LineageTableNode.
-    - Complete nodes start new columns.
-    - Incremental nodes build upon previous nodes in the same column.
-
-    Example structure:
-        Date1: [Complete, None,    None   ]
-        Date2: [Inc1,    Complete, None   ]
-        Date3: [Inc2,    Inc1,    Complete]
-
-    Attributes:
-        zfs_dataset_path (PurePath): Path to the ZFS dataset.
-        index (tuple[Datetime, ...]): Tuple of datetimes representing the row labels.
-        data (tuple[LineageTableChain, ...]): Matrix of LineageTableNodes.
-        orphaned_nodes (tuple[LineageTableNode, ...]): Nodes not belonging to any valid lineage.
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    zfs_dataset_path: PurePath
-    index: tuple[Datetime, ...]
-    data: tuple[LineageTableChain, ...]
-    orphaned_nodes: tuple[LineageTableNode, ...]
+    @abstractmethod
+    def recv(stream: SnapshotStream):
+        pass
