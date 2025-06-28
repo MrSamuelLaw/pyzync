@@ -16,7 +16,8 @@ logger = logging.getLogger(__name__)
 
 
 class HostSnapshotManager:
-    """Manages ZFS snapshots on the host system.
+    """
+    Manages ZFS snapshots on the host system.
 
     Provides functionality for creating, querying, destroying, and sending both complete
     and incremental snapshots using ZFS commands.
@@ -25,6 +26,21 @@ class HostSnapshotManager:
     @staticmethod
     @validate_call
     def create(dt: Datetime, graph: SnapshotGraph, dryrun: bool = False):
+        """
+        Create a snapshot for the given dataset at the specified datetime.
+
+        Args:
+            dt (Datetime): The datetime for the snapshot.
+            graph (SnapshotGraph): The snapshot graph to update.
+            dryrun (bool, optional): If True, do not perform actual operations. Defaults to False.
+
+        Returns:
+            SnapshotNode: The created snapshot node.
+
+        Raises:
+            subprocess.CalledProcessError: If the ZFS snapshot command fails.
+            Exception: For other errors during snapshot creation.
+        """
         logger.info(f"Creating snapshot for {graph.dataset_id} on {dt}.")
         try:
             node = SnapshotNode(dataset_id=graph.dataset_id, dt=dt)
@@ -45,6 +61,19 @@ class HostSnapshotManager:
     @staticmethod
     @validate_call
     def query(dataset_id: Optional[ZfsDatasetId] = None):
+        """
+        Query all snapshots for a given dataset or all datasets.
+
+        Args:
+            dataset_id (Optional[ZfsDatasetId], optional): The dataset to query. Defaults to None.
+
+        Returns:
+            list[SnapshotGraph]: List of snapshot graphs for each dataset.
+
+        Raises:
+            subprocess.CalledProcessError: If the ZFS list or grep command fails.
+            Exception: For other errors during query.
+        """
         logger.debug(f"Querying SnapshotNodes for {dataset_id}")
 
         try:
@@ -84,6 +113,18 @@ class HostSnapshotManager:
     @staticmethod
     @validate_call
     def destroy(node: SnapshotNode, graph: SnapshotGraph, dryrun: bool = False):
+        """
+        Destroy a snapshot node from the graph and the ZFS system.
+
+        Args:
+            node (SnapshotNode): The snapshot node to destroy.
+            graph (SnapshotGraph): The snapshot graph to update.
+            dryrun (bool, optional): If True, do not perform actual operations. Defaults to False.
+
+        Raises:
+            subprocess.CalledProcessError: If the ZFS destroy command fails.
+            Exception: For other errors during destroy.
+        """
         logger.info(f"Destroying snapshot for snapshot {node.snapshot_id} with dryrun = {dryrun}")
         try:
             graph.remove(node)
@@ -107,7 +148,26 @@ class HostSnapshotManager:
              zfs_args: list[str] = [],
              blocksize: int = 4096,
              dryrun: bool = False):
+        """
+        Send a snapshot or incremental snapshot as a stream.
 
+        Args:
+            dt (Datetime): The datetime of the snapshot to send.
+            graph (SnapshotGraph): The snapshot graph.
+            parent_dt (Optional[Datetime], optional): The parent snapshot datetime for incremental. Defaults to None.
+            zfs_args (list[str], optional): Additional ZFS arguments. Defaults to [].
+            blocksize (int, optional): Block size for streaming. Defaults to 4096.
+            dryrun (bool, optional): If True, do not perform actual operations. Defaults to False.
+
+        Returns:
+            SnapshotStream: The snapshot stream object.
+
+        Raises:
+            DataIntegrityError: If parent_dt is not less than dt.
+            ValueError: If the graph does not contain the required nodes.
+            subprocess.CalledProcessError: If the ZFS send command fails.
+            Exception: For other errors during send.
+        """
         if (parent_dt is not None) and (parent_dt >= dt):
             raise DataIntegrityError(
                 dedent("""
@@ -173,7 +233,19 @@ class HostSnapshotManager:
              graph: SnapshotGraph,
              zfs_args: list[str] = [],
              dryrun: bool = False):
+        """
+        Receive a snapshot stream and add it to the graph and ZFS system.
 
+        Args:
+            stream (SnapshotStream): The snapshot stream to receive.
+            graph (SnapshotGraph): The snapshot graph to update.
+            zfs_args (list[str], optional): Additional ZFS arguments. Defaults to [].
+            dryrun (bool, optional): If True, do not perform actual operations. Defaults to False.
+
+        Raises:
+            subprocess.CalledProcessError: If the ZFS recv command fails.
+            Exception: For other errors during receive.
+        """
         logger.info(f"Receiving snapshot stream for {stream}")
         graph.add(stream.node)
         # Use only the dataset name for zfs recv target

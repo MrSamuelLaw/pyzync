@@ -13,18 +13,18 @@ if __name__ == '__main__':
     # Stdout handler set to INFO and above
     stdout_handler = logging.StreamHandler(sys.stdout)
     stdout_handler.setLevel(logging.INFO)
-    stdout_handler.setFormatter(logging.Formatter('%(levelname)s:%(name)s:%(message)s'))
+    stdout_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s:%(name)s:%(message)s'))
     root_logger.addHandler(stdout_handler)
 
     # Stderr handler set to ERROR
     stderr_handler = logging.StreamHandler(sys.stderr)
     stderr_handler.setLevel(logging.ERROR)
-    stderr_handler.setFormatter(logging.Formatter('%(levelname)s:%(name)s:%(message)s'))
+    stderr_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s:%(name)s:%(message)s'))
     root_logger.addHandler(stderr_handler)
 
     # define the backup config for each job
     config = {
-        'tank0/foo': BackupJob(
+        'tank1/foo': BackupJob(
             retention_policy=LastNSnapshotsPolicy(n_snapshots=5),
             adapters=[LocalFileStorageAdapter(directory='/home/samuel/documents/pyzync/tests/test_backup_files')]
         )

@@ -20,12 +20,24 @@ logger = logging.getLogger(__name__)
 
 
 class FileSnapshotManager(BaseModel):
+    """
+    Manages snapshot graphs using a storage adapter backend.
+    """
 
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
     adapter: SnapshotStorageAdapter
 
     def query(self, dataset_id: Optional[ZfsDatasetId] = None):
+        """
+        Query all snapshots for a given dataset or all datasets from the adapter.
+
+        Args:
+            dataset_id (Optional[ZfsDatasetId], optional): The dataset to query. Defaults to None.
+
+        Returns:
+            list[SnapshotGraph]: List of snapshot graphs for each dataset.
+        """
         files = self.adapter.query(dataset_id)
         nodes = [SnapshotNode.from_zfs_filepath(f) for f in files]
         graphs: list[SnapshotGraph] = []
@@ -41,7 +53,16 @@ class FileSnapshotManager(BaseModel):
                 dryrun: bool = False,
                 prune: bool = False,
                 force: bool = False):
+        """
+        Destroy a snapshot node from the graph and storage backend.
 
+        Args:
+            node (SnapshotNode): The snapshot node to destroy.
+            graph (SnapshotGraph): The snapshot graph to update.
+            dryrun (bool, optional): If True, do not perform actual operations. Defaults to False.
+            prune (bool, optional): If True, prune orphaned nodes. Defaults to False.
+            force (bool, optional): If True, force deletion. Defaults to False.
+        """
         logger.info(f'Destroying node = {node}')
         # if there is only one chain, prevent the user from deleting anything but the last link
         chains = graph.get_chains()
@@ -66,6 +87,18 @@ class FileSnapshotManager(BaseModel):
              graph: SnapshotGraph,
              blocksize: int = 4096,
              dryrun: bool = False):
+        """
+        Send a snapshot node as a stream using the adapter.
+
+        Args:
+            node (SnapshotNode): The snapshot node to send.
+            graph (SnapshotGraph): The snapshot graph.
+            blocksize (int, optional): Block size for streaming. Defaults to 4096.
+            dryrun (bool, optional): If True, do not perform actual operations. Defaults to False.
+
+        Returns:
+            SnapshotStream: The snapshot stream object.
+        """
         if node not in graph.get_nodes():
             raise ValueError(f'Node = {node} not part of graph = {graph}')
         if dryrun:
@@ -80,6 +113,15 @@ class FileSnapshotManager(BaseModel):
              graph: SnapshotGraph,
              dryrun: bool = False,
              duplicate_policy: DuplicateDetectedPolicy = 'error'):
+        """
+        Receive a snapshot stream and add it to the graph and storage backend.
+
+        Args:
+            stream (SnapshotStream): The snapshot stream to receive.
+            graph (SnapshotGraph): The snapshot graph to update.
+            dryrun (bool, optional): If True, do not perform actual operations. Defaults to False.
+            duplicate_policy (DuplicateDetectedPolicy, optional): Policy for handling duplicates. Defaults to 'error'.
+        """
         logger.info(f'Receiveing stream for node = {stream.node}')
         is_duplicate = stream.node in graph.get_nodes()
         if (not is_duplicate) or (is_duplicate and duplicate_policy == 'error'):
@@ -89,6 +131,9 @@ class FileSnapshotManager(BaseModel):
 
 
 class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
+    """
+    Storage adapter for handling snapshot files on the local filesystem.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -97,11 +142,29 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
     @field_validator('directory')
     @classmethod
     def validate_path(cls, directory: Path):
+        """
+        Validate that the directory is an absolute path.
+
+        Args:
+            directory (Path): The directory path to validate.
+
+        Returns:
+            Path: The resolved absolute path.
+        """
         if not directory.is_absolute():
             raise ValueError(f"directory must be absolute, instead received path = {directory}")
         return directory.resolve()
 
     def query(self, dataset_id: Optional[ZfsDatasetId] = None):
+        """
+        Query all .zfs files in the directory for a given dataset or all datasets.
+
+        Args:
+            dataset_id (Optional[ZfsDatasetId], optional): The dataset to query. Defaults to None.
+
+        Returns:
+            list[ZfsFilePath]: List of matching ZFS file paths.
+        """
         # query all the .zfs files at the root and below
         logger.debug(f"Querying snapshot files in {self.directory} for {dataset_id}")
         glob_pattern = "*.zfs" if dataset_id is None else f"**/{dataset_id}/*.zfs"
@@ -121,6 +184,12 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
         return matches
 
     def destroy(self, filepath: ZfsFilePath):
+        """
+        Destroy a snapshot file at the given file path.
+
+        Args:
+            filepath (ZfsFilePath): The file path to destroy.
+        """
         filepath = self.directory.joinpath(filepath)
         logger.info(f"Destroying file: {filepath}")
         try:
@@ -129,6 +198,19 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
             logger.warning(f"File not found during destroy: {filepath}")
 
     def recv(self, stream: SnapshotStream):
+        """
+        Receive a snapshot stream and write it to the local filesystem.
+
+        Args:
+            stream (SnapshotStream): The snapshot stream to receive.
+
+        Returns:
+            Path: The path to the written file.
+
+        Raises:
+            FileNotFoundError: If the parent directory cannot be created or file cannot be written.
+            OSError: If there is an OS error during file operations.
+        """
         path = self.directory.joinpath(stream.node.filepath)
         logger.info(f"Receiving snapshot stream to {path}")
         # create the parent dirs if they don't exist
@@ -141,6 +223,20 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
         return path
 
     def send(self, filepath: Path, blocksize: int = 4096):
+        """
+        Send a snapshot file as a stream from the local filesystem.
+
+        Args:
+            filepath (Path): The file path to send.
+            blocksize (int, optional): Block size for streaming. Defaults to 4096.
+
+        Returns:
+            generator: A generator yielding file chunks as bytes.
+
+        Raises:
+            FileNotFoundError: If the file does not exist.
+            OSError: If there is an OS error during file operations.
+        """
         filepath = self.directory.joinpath(filepath)
         logger.info(f"Sending snapshot file {filepath}")
 

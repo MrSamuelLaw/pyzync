@@ -29,6 +29,20 @@ class BackupJob(BaseModel):
                host: HostSnapshotManager = HostSnapshotManager,
                dt: Datetime = Datetime.now(),
                dryrun: bool = False):
+        """
+        Create a new snapshot and delete old ones using the retention policy.
+
+        Args:
+            dataset_id (ZfsDatasetId): The dataset to rotate snapshots for.
+            host (HostSnapshotManager, optional): Host snapshot manager. Defaults to HostSnapshotManager.
+            dt (Datetime, optional): Datetime for the new snapshot. Defaults to Datetime.now().
+            dryrun (bool, optional): If True, do not perform actual operations. Defaults to False.
+
+        Returns:
+            tuple: (keep, destroy) nodes after applying retention policy.
+        Raises:
+            Exception: If an error occurs during rotation.
+        """
         # create a new snapshot and delete the old ones using the retention policy
         logger.info(f"Rotating snapshots for dataset {dataset_id}")
         try:
@@ -50,6 +64,19 @@ class BackupJob(BaseModel):
              dryrun: bool = False,
              prune: bool = True,
              duplicate_policy: DuplicateDetectedPolicy = 'ignore'):
+        """
+        Sync host snapshots to all configured adapters (remotes).
+
+        Args:
+            dataset_id (ZfsDatasetId): The dataset to sync.
+            host (HostSnapshotManager, optional): Host snapshot manager. Defaults to HostSnapshotManager.
+            force (bool, optional): Force deletion of snapshots. Defaults to False.
+            dryrun (bool, optional): If True, do not perform actual operations. Defaults to False.
+            prune (bool, optional): Prune orphaned nodes. Defaults to True.
+            duplicate_policy (DuplicateDetectedPolicy, optional): Policy for handling duplicates. Defaults to 'ignore'.
+        Raises:
+            Exception: If an error occurs during sync or remote operations.
+        """
         # get the host graph
         graphs = host.query(dataset_id)
         host_graph = graphs[0] if graphs else SnapshotGraph(dataset_id=dataset_id)
