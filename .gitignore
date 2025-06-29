@@ -1,5 +1,6 @@
 __pycache__/
 /dev
+**/*.venv
 backup.bash
 backup.log
 tests/local_storage_adapter_files/

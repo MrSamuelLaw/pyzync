@@ -91,40 +91,70 @@ sudo apt update
 sudo apt install -y zfsutils-linux
 ```
 
-### 3. Add Your User to the `sudo` and `zfs` Groups
+### 3. Allow Non-root Users to Run ZFS Commands
+Set the sticky bit on the ZFS binaries so users can run them without sudo:
 ```bash
-sudo usermod -aG sudo $USER
-sudo groupadd zfs
-sudo usermod -aG zfs $USER
-```
-Log out and log back in for group changes to take effect.
-
-### 4. Allow Non-root Users to Run ZFS Commands
-Set the sticky bit on the ZFS binaries so users in the `zfs` group can run them without sudo:
-```bash
-sudo chgrp zfs /sbin/zfs /sbin/zpool
-sudo chmod 750 /sbin/zfs /sbin/zpool
-sudo chmod g+s /sbin/zfs /sbin/zpool
+sudo chmod u+s /sbin/zfs /sbin/zpool
 ```
 
-### 5. (Optional) Create a Test ZFS Pool
+### 4. Create a Test ZFS Pool
 You can create a ZFS pool using a loopback file for safe testing:
 
 ```bash
 fallocate -l 2G /tmp/zfs_test.img
-sudo zpool create testpool /tmp/zfs_test.img
+sudo zpool create tank0 /tmp/zfs_test.img
 ```
 
 **Explanation:**
 - `fallocate -l 2G /tmp/zfs_test.img` creates a 2GB file on your disk. This file will act as a virtual disk for ZFS, so you don't need to use a real disk or partition.
-- `sudo zpool create testpool /tmp/zfs_test.img` creates a new ZFS pool named `testpool` using the file as its storage device. This is useful for testing and development, as it is non-destructive and can be easily removed.
-- You can safely experiment with ZFS commands and Pyzync on this pool without affecting your real data or disks.
+- `sudo zpool create tank0 /tmp/zfs_test.img` creates a new ZFS pool named `tank0` using the file as its storage device. This is useful for testing and development, as it is non-destructive and can be easily removed.
+- You can safely experiment with ZFS commands and Pyzync on this pool without affecting your real data or disks.  
 
-### 6. Verify Permissions
+Create the zfs filesystems needed for testing
+
+```bash
+sudo zfs create tank0/foo
+sudo zfs create tank0/bar
+```
+
+### 5. Grant ZFS Permissions to Your User or Group
+To allow your user to create and manage snapshots on the test pool, you must delegate ZFS permissions. This step is required for non-root users to create, destroy, or send/receive snapshots.
+
+
+Grant permissions to your user:
+```bash
+sudo zfs allow $USER snapshot,create,destroy,hold,release,mount,send,receive tank0
+sudo zfs allow $USER snapshot,create,destroy,hold,release,mount,send,receive tank0/foo
+sudo zfs allow $USER snapshot,create,destroy,hold,release,mount,send,receive tank0/bar
+```
+
+- This enables non-root users to manage snapshots and perform backup/restore operations on the test pool.
+- You can verify permissions with:
+
+```bash
+zfs allow tank0
+```
+
+### 6. Allow Your User to Create Files in the Dataset
+
+By default, ZFS datasets are owned by root and only writable by the owner. To allow your user to create files, set your user as the owner and the group as needed on the mountpoint.
+
+```bash
+sudo chown -R $USER /tank0
+```
+
+- `chown -R $USER` sets your user as the owner and `zfs` as the group.
+- Adjust the group as needed for your use case.
+
+If you want all users to be able to create files, use `chmod 777` (less secure).
+
+### 7. Verify Permissions
 Switch to your user and run:
 ```bash
 zfs list
 zpool status
+zfs snapshot tank0@test
+touch tank0/foo/test.txt
 ```
 You should be able to run these commands without `sudo`.
 
