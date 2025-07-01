@@ -3,7 +3,7 @@ from typing import Optional
 
 from pyzync.errors import DataIntegrityError
 from pyzync.interfaces import SnapshotStorageAdapter, ZfsDatasetId, SnapshotStream, SnapshotGraph, SnapshotNode
-from pyzync.storage_adapters import FileSnapshotManager
+from pyzync.storage_adapters import RemoteSnapshotManager
 
 
 class FakeStorageAdapter(SnapshotStorageAdapter):
@@ -31,7 +31,7 @@ class FakeStorageAdapter(SnapshotStorageAdapter):
 class TestFileSnapshotManager(unittest.TestCase):
 
     def test_can_use_file_snapshot_manager(self):
-        manager = FileSnapshotManager(adapter=FakeStorageAdapter())
+        manager = RemoteSnapshotManager(adapter=FakeStorageAdapter())
 
         # verify the query works
         graphs = manager.query()
@@ -60,7 +60,7 @@ class TestFileSnapshotManager(unittest.TestCase):
         graph = SnapshotGraph(dataset_id='tank0/foo')
         [graph.add(node) for node in nodes]
         # destroy the first 3 in the chain using a fake adapter
-        manager = FileSnapshotManager(adapter=FakeStorageAdapter())
+        manager = RemoteSnapshotManager(adapter=FakeStorageAdapter())
         manager.destroy(nodes[0], graph, prune=True)
         # check that only one chain exists
         chains = graph.get_chains()
@@ -77,7 +77,7 @@ class TestFileSnapshotManager(unittest.TestCase):
         graph = SnapshotGraph(dataset_id='tank0/foo')
         [graph.add(node) for node in nodes]
         # # attempt to destroy the root node
-        manager = FileSnapshotManager(adapter=FakeStorageAdapter())
+        manager = RemoteSnapshotManager(adapter=FakeStorageAdapter())
         with self.assertRaisesRegex(DataIntegrityError, 'must set force = True to delete node'):
             manager.destroy(nodes[0], graph, prune=True)
         manager.destroy(nodes[0], graph, prune=True, force=True)
@@ -94,7 +94,7 @@ class TestFileSnapshotManager(unittest.TestCase):
         graph = SnapshotGraph(dataset_id='tank0/foo')
         [graph.add(node) for node in nodes]
         # add a new nodes using a fake adapter
-        manager = FileSnapshotManager(adapter=FakeStorageAdapter())
+        manager = RemoteSnapshotManager(adapter=FakeStorageAdapter())
         new_node = SnapshotNode(dataset_id='tank0/foo', dt='20250505T120001')
         stream = SnapshotStream(node=new_node, bytes_stream=(b'some_bytes',))
         manager.recv(stream, graph)

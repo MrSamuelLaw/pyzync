@@ -1,8 +1,10 @@
 __pycache__/
 /dev
 **/*.venv
-backup.bash
+.env
+.vscode
+backup.py
+backup.sh
 backup.log
-tests/local_storage_adapter_files/
 tests/test_loop_check_files/
 tests/test_backup_files/

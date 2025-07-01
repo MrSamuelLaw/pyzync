@@ -380,28 +380,28 @@ class SnapshotStorageAdapter(ABC):
     """
 
     @abstractmethod
-    def query(dataset_id: Optional[ZfsDatasetId]) -> list[SnapshotGraph]:
+    def query(self, dataset_id: Optional[ZfsDatasetId]) -> list[SnapshotGraph]:
         """
         Query for snapshot graphs for a dataset.
         """
         pass
 
     @abstractmethod
-    def destroy(node: SnapshotNode):
+    def destroy(self, node: SnapshotNode):
         """
         Destroy a snapshot node in storage.
         """
         pass
 
     @abstractmethod
-    def send(filepath: ZfsFilePath, blocksize: int = 4096) -> 'SnapshotStream':
+    def send(self, node: SnapshotNode, blocksize: int = 4096) -> Iterable[bytes]:
         """
         Send a snapshot file as a stream.
         """
         pass
 
     @abstractmethod
-    def recv(stream: 'SnapshotStream'):
+    def recv(self, stream: SnapshotStream):
         """
         Receive a snapshot stream and store it.
         """

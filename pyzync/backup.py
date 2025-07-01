@@ -7,7 +7,7 @@ import logging
 from pydantic import BaseModel, ConfigDict
 
 from pyzync.host import HostSnapshotManager
-from pyzync.storage_adapters import FileSnapshotManager
+from pyzync.storage_adapters import RemoteSnapshotManager
 from pyzync.retention_policies import RetentionPolicy
 from pyzync.interfaces import ZfsDatasetId, SnapshotGraph, DuplicateDetectedPolicy, SnapshotStorageAdapter, Datetime
 
@@ -83,7 +83,7 @@ class BackupJob(BaseModel):
         chain = sorted(list(host_graph.get_nodes()), key=lambda node: node.dt)
         for adapter in self.adapters:
             # get the graph for the remote
-            manager = FileSnapshotManager(adapter=adapter)
+            manager = RemoteSnapshotManager(adapter=adapter)
             graphs = manager.query(dataset_id)
             remote_graph = graphs[0] if graphs else SnapshotGraph(dataset_id=dataset_id)
 

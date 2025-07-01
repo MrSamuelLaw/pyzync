@@ -4,9 +4,10 @@ This module provides concrete implementations of the SnapshotStorageAdapter inte
 for different storage backends. Currently supports local filesystem storage.
 """
 
-import re
+import dropbox
 import logging
-from pathlib import Path
+from io import BytesIO
+from pathlib import Path, PurePath
 from typing import Optional
 from itertools import groupby
 
@@ -19,7 +20,7 @@ from pyzync.interfaces import (SnapshotStorageAdapter, SnapshotStream, Duplicate
 logger = logging.getLogger(__name__)
 
 
-class FileSnapshotManager(BaseModel):
+class RemoteSnapshotManager(BaseModel):
     """
     Manages snapshot graphs using a storage adapter backend.
     """
@@ -72,15 +73,15 @@ class FileSnapshotManager(BaseModel):
         # remove the node
         graph.remove(node)
         if not dryrun:
-            self.adapter.destroy(node.filepath)
+            self.adapter.destroy(node)
         # prune if needed
         if prune:
             orphans = graph.get_orphans()
-            for o in orphans:
-                logger.info(f'Destroying node = {o}')
-                graph.remove(o)
+            for node in orphans:
+                logger.info(f'Destroying node = {node}')
+                graph.remove(node)
                 if not dryrun:
-                    self.adapter.destroy(o.filepath)
+                    self.adapter.destroy(node)
 
     def send(self,
              node: SnapshotNode,
@@ -104,8 +105,7 @@ class FileSnapshotManager(BaseModel):
         if dryrun:
             stream = SnapshotStream(node=node, bytes_stream=(b'bytes_stream',))
         else:
-            stream = SnapshotStream(node=node,
-                                    bytes_stream=self.adapter.send(node.filepath, blocksize=blocksize))
+            stream = SnapshotStream(node=node, bytes_stream=self.adapter.send(node, blocksize=blocksize))
         return stream
 
     def recv(self,
@@ -183,13 +183,14 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
         matches = filt(matches)
         return matches
 
-    def destroy(self, filepath: ZfsFilePath):
+    def destroy(self, node: SnapshotNode):
         """
         Destroy a snapshot file at the given file path.
 
         Args:
-            filepath (ZfsFilePath): The file path to destroy.
+            node (SnapshotNode): The node to destroy.
         """
+        filepath = node.filepath
         filepath = self.directory.joinpath(filepath)
         logger.info(f"Destroying file: {filepath}")
         try:
@@ -220,14 +221,13 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
         with open(path, 'wb') as handle:
             for chunk in stream.bytes_stream:
                 handle.write(chunk)
-        return path
 
-    def send(self, filepath: Path, blocksize: int = 4096):
+    def send(self, node: SnapshotNode, blocksize: int = 4096):
         """
         Send a snapshot file as a stream from the local filesystem.
 
         Args:
-            filepath (Path): The file path to send.
+            node (SnapshotNode): The node to send.
             blocksize (int, optional): Block size for streaming. Defaults to 4096.
 
         Returns:
@@ -237,6 +237,7 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
             FileNotFoundError: If the file does not exist.
             OSError: If there is an OS error during file operations.
         """
+        filepath = node.filepath
         filepath = self.directory.joinpath(filepath)
         logger.info(f"Sending snapshot file {filepath}")
 
@@ -247,5 +248,114 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
                     if not chunk:
                         break
                     yield chunk
+
+        return _snapshot_stream()
+
+
+class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
+    """
+    Storage adapter for handling snapshot files on Dropbox.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    access_token: str
+    directory: PurePath
+
+    @field_validator('directory')
+    @classmethod
+    def validate_path(cls, directory: PurePath):
+        """
+        Validate that the directory is an absolute path.
+
+        Args:
+            directory (Path): The directory path to validate.
+
+        Returns:
+            Path: The resolved absolute path.
+        """
+        if not directory.is_absolute():
+            raise ValueError(f"directory must be absolute, instead received path = {directory}")
+        return directory
+
+    def _client(self):
+        return dropbox.Dropbox(self.access_token)
+
+    def query(self, dataset_id: Optional[ZfsDatasetId] = None):
+        """
+        Query all .zfs files in Dropbox for a given dataset or all datasets.
+        """
+        dbx = self._client()
+        # Build the path to list
+        if dataset_id is None:
+            path = self.directory
+        else:
+            path = self.directory.joinpath(dataset_id)
+        # Recursively list all .zfs files
+        def list_files(folder):
+            try:
+                res = dbx.files_list_folder(folder, recursive=True)
+            except dropbox.exceptions.ApiError:
+                return []
+            entries = res.entries
+            while res.has_more:
+                res = dbx.files_list_folder_continue(res.cursor)
+                entries.extend(res.entries)
+            return [e for e in entries if isinstance(e, dropbox.files.FileMetadata)]
+
+        files = list_files(str(path))
+        # Filter for .zfs files and convert to ZfsFilePath relative to root_path
+        matches = []
+        for f in files:
+            if f.name.endswith('.zfs'):
+                path = PurePath(f.path_display)
+                path = path.relative_to(self.directory)
+                try:
+                    matches.append(ZfsFilePath(str(path)))
+                except ValueError:
+                    pass
+        return matches
+
+    def destroy(self, node: SnapshotNode):
+        """
+        Delete a snapshot file from Dropbox.
+        """
+        dbx = self._client()
+        path = self.directory.joinpath(node.filepath)
+        try:
+            dbx.files_delete_v2(str(path))
+        except dropbox.exceptions.ApiError as e:
+            logger.warning(f"Dropbox file not found during destroy: {path}")
+
+    def recv(self, stream: SnapshotStream):
+        """
+        Receive a snapshot stream and upload it to Dropbox.
+        """
+        dbx = self._client()
+        path = str(self.directory.joinpath(stream.node.filepath))
+        # Dropbox API requires bytes, so we need to join the stream
+        buf = BytesIO()
+        for chunk in stream.bytes_stream:
+            buf.write(chunk)
+        buf.seek(0)
+        dbx.files_upload(buf.read(), path, mode=dropbox.files.WriteMode.overwrite)
+
+    def send(self, node: SnapshotNode, blocksize: int = 4096):
+        """
+        Download a snapshot file from Dropbox as a stream.
+        """
+        dbx = self._client()
+        path = str(self.directory.joinpath(node.filepath))
+        # Download file content into memory (BytesIO)
+        metadata, res = dbx.files_download(path)
+        from io import BytesIO
+        buf = BytesIO(res.content)
+
+        def _snapshot_stream():
+            while True:
+                chunk = buf.read(blocksize)
+                if not chunk:
+                    break
+                yield chunk
 
         return _snapshot_stream()
