@@ -24,36 +24,17 @@ pip install -r requirements.txt
 ## Usage
 
 ### 1. Configure a Backup Job
-Edit or create a Python script (or use `pyzync/pyzync/__main__.py` as a template):
+Edit or create a Python script (or use `pyzync/example.backup.py` as a template):
 
-```python
-from pyzync.backup import BackupJob
-from pyzync.retention_policies import LastNSnapshotsPolicy
-from pyzync.storage_adapters import LocalFileStorageAdapter
-
-config = {
-    'tank0/foo': BackupJob(
-        retention_policy=LastNSnapshotsPolicy(n_snapshots=5),
-        adapters=[LocalFileStorageAdapter(directory='/path/to/backup/directory')]
-    )
-}
-
-for dataset_id, job in config.items():
-    job.rotate(dataset_id)
-    job.sync(dataset_id)
-```
-
-- Replace `'tank0/foo'` with your ZFS dataset name.
+- Replace `'tank1/foo' and 'tank1/bar` with your ZFS dataset name.
 - Set the backup directory to a location with sufficient space.
 
 ### 2. Run the Backup
-You can run the backup job from the command line:
+You can run backup.py from the command line:
 
 ```bash
-python -m pyzync
+python ./backup.py
 ```
-
-Or run your custom script as needed.
 
 ### 3. Scheduling Backups with Cron
 
@@ -68,7 +49,7 @@ crontab -e
 2. Add a line to schedule your backup. For example, to run the backup every day at 2:00 AM:
 
 ```
-0 2 * * * /usr/bin/python3 /path/to/your/backup_script.py >> /var/log/pyzync_backup.log 2>&1
+0 2 * * * /usr/bin/python3 /path/to/your/backup.py >> /path/to/your/backup.log 2>&1
 ```
 
 - Adjust the schedule and paths as needed.
