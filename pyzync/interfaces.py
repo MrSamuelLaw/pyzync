@@ -1,15 +1,13 @@
 import re
-from pathlib import PurePath
 from itertools import chain
 from collections import defaultdict
 from abc import ABC, abstractmethod
 from datetime import datetime, tzinfo
-from typing import Self, Iterable, Optional, Literal, overload, Any
+from typing import Self, Iterable, Optional, Literal, overload, Any, TypeAlias
 
-from pydantic import (BaseModel, Field, BeforeValidator, model_validator, field_validator,
-                      computed_field, ConfigDict, GetCoreSchemaHandler, validate_call)
+from pydantic import (BaseModel, model_validator, computed_field, ConfigDict, GetCoreSchemaHandler,
+                      validate_call)
 from pydantic_core import CoreSchema, core_schema
-
 
 DATETIME_FORMAT = r"%Y%m%dT%H%M%S"
 DATETIME_REGEX = r'\d{8}T\d{6}'
@@ -92,7 +90,7 @@ class ZfsDatasetId(str):
     """
     String type for ZFS dataset IDs with validation.
     """
-    
+
     _pattern = re.compile(r"(\w)+(\w|\/)+")
 
     def __new__(cls, path: str):
@@ -118,7 +116,7 @@ class ZfsSnapshotId(str):
     """
     String type for ZFS snapshot IDs with validation.
     """
-    
+
     _pattern = re.compile(r"(\w)+(\w|\/)+(@{inj})".format(inj=DATETIME_REGEX))
 
     def __new__(cls, snapshot_id):
@@ -144,7 +142,7 @@ class ZfsFilePath(str):
     """
     String type for ZFS file paths with validation.
     """
-    
+
     _pattern = re.compile(r"(\w)+(\w|\/)+(({inj})|({inj}_{inj})).zfs".format(inj=DATETIME_REGEX))
     _dt_pattern = re.compile(DATETIME_REGEX)
 
@@ -160,7 +158,7 @@ class ZfsFilePath(str):
 
         dts = cls._dt_pattern.findall(path)
         dts = [Datetime(dt) for dt in dts]
-        
+
         return str.__new__(cls, path)
 
     @classmethod
@@ -184,7 +182,7 @@ class SnapshotNode(BaseModel):
     dt: Datetime
     parent_dt: Optional[Datetime] = None
     dataset_id: ZfsDatasetId
-    
+
     @model_validator(mode='after')
     def validate_data(self):
         """
@@ -231,7 +229,7 @@ class SnapshotNode(BaseModel):
         Return the string representation (file path) of the node.
         """
         return self.filepath
-    
+
     def __hash__(self):
         """
         Return the hash of the node's file path.
@@ -249,7 +247,7 @@ class SnapshotNode(BaseModel):
         """
         dataset_id, dt = snapshot_id.split('@')
         return cls(dataset_id=dataset_id, dt=dt)
-    
+
     @classmethod
     @validate_call
     def from_zfs_filepath(cls, filepath: ZfsFilePath):
@@ -263,15 +261,11 @@ class SnapshotNode(BaseModel):
         dataset_id = '/'.join(parts[:-1])
         name = parts[-1]
         dates = filepath._dt_pattern.findall(name)
-        node = cls(
-            dataset_id = dataset_id,
-            dt = dates[-1],
-            parent_dt = dates[0] if len(dates) == 2 else None
-        )
+        node = cls(dataset_id=dataset_id, dt=dates[-1], parent_dt=dates[0] if len(dates) == 2 else None)
         return node
-    
 
-type SnapshotChain = list[Optional[SnapshotNode]] 
+
+SnapshotChain: TypeAlias = list[Optional[SnapshotNode]]
 
 
 class SnapshotGraph(BaseModel):
@@ -302,7 +296,7 @@ class SnapshotGraph(BaseModel):
         # orphaned nodes are all nodes not found in a chain
         orphans = nodes - chained_nodes
         return orphans
-    
+
     def get_chains(self):
         """
         Return all chains of snapshots in the graph.
@@ -310,7 +304,7 @@ class SnapshotGraph(BaseModel):
         # pop the biggest group as the starting point, since that will be how many lineages there will be.
         nodes = self.get_nodes()
         _chains = [[n] for n in nodes if n.node_type == 'complete']
-        nodes = {n for n in nodes if n .node_type == 'incremental'}
+        nodes = {n for n in nodes if n.node_type == 'incremental'}
         i = 0
         chains: list[SnapshotChain] = []
         while i < 1024 and _chains:
@@ -326,7 +320,7 @@ class SnapshotGraph(BaseModel):
             else:
                 chains.append(chain_)
         return chains
-    
+
     def add(self, node: SnapshotNode) -> None:
         """
         Add a node to the graph.
@@ -335,7 +329,8 @@ class SnapshotGraph(BaseModel):
             ValueError: If the node's dataset_id does not match or is duplicate.
         """
         if node.dataset_id != self.dataset_id:
-            raise ValueError(f'Failed to add node = {node} to table, node & table have different dataset_ids.')
+            raise ValueError(
+                f'Failed to add node = {node} to table, node & table have different dataset_ids.')
         group = self._table[node.dt]
         if node in group:
             raise ValueError(f'Cannot add duplicate node = {node}')
@@ -361,12 +356,12 @@ class SnapshotStream(BaseModel):
     """
     Represents a stream of snapshot data for transfer.
     """
-    
+
     model_config = ConfigDict(frozen=True)
 
     node: SnapshotNode
     bytes_stream: Iterable[bytes]
-    
+
     def __str__(self):
         """
         Return a string representation of the snapshot stream.

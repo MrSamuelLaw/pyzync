@@ -29,16 +29,16 @@ dotenv.load_dotenv()
 # define the backup config for each job
 backup_config = {
     'tank1/foo':
-        BackupJob(retention_policy=LastNSnapshotsPolicy(n_snapshots=5),
-                  adapters=[
-                      LocalFileStorageAdapter(directory='/home/path/to/your/backup/dir'),
-                      DropboxStorageAdapter(directory='/dropbox/directory',
-                                            access_token='your_access_token')
-                  ]),
-    'tank1/bar':
-        BackupJob(retention_policy=LastNSnapshotsPolicy(n_snapshots=30),
-                  adapters=[
-                      DropboxStorageAdapter(directory='/dropbox/directory',
-                                            access_token='your_access_token')
-                  ]),
+        BackupJob(
+            retention_policy=LastNSnapshotsPolicy(n_snapshots=5),
+            adapters=[
+                LocalFileStorageAdapter(directory=environ['BACKUP_DIR']),
+                  DropboxStorageAdapter(directory=environ['DROPBOX_DIR'],
+                                        access_token=environ['DROPBOX_TOKEN'])
+            ])
 }
+
+# perform a rotate and run each job
+for dataset_id, job in backup_config.items():
+    job.rotate(dataset_id)
+    job.sync(dataset_id)
