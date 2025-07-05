@@ -172,14 +172,11 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
         glob_pattern = "*.zfs" if dataset_id is None else f"**/{dataset_id}/*.zfs"
         matches = {fp for fp in self.directory.rglob(glob_pattern)}
         matches = {r.relative_to(self.directory) for r in matches}
-        pattern = re.compile('_d+.zfs')
 
         def filt(results):
             matches = set()
-            # pattern = ZfsDatasetId._pattern
             for r in results:
                 try:
-                    # if the stream was chunked, strip the _1 before the.zfs
                     matches.add(ZfsFilePath(str(r)))
                 except ValueError:
                     pass
@@ -196,12 +193,24 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
             node (SnapshotNode): The node to destroy.
         """
         filepath = node.filepath
-        filepath = self.directory.joinpath(filepath)
-        logger.info(f"Destroying file: {filepath}")
-        try:
-            filepath.unlink()
-        except FileNotFoundError as e:
-            logger.warning(f"File not found during destroy: {filepath}")
+        base_path = self.directory.joinpath(filepath)
+        base_path = base_path.resolve()
+        directory = base_path.parent
+        stem = base_path.stem
+        suffix = base_path.suffix
+        logger.info(f"Sending snapshot file(s) for {base_path}")
+
+        # Find all chunked files: base, _1, _2, ...
+        pattern = re.compile(rf"{re.escape(stem)}_\d+{re.escape(suffix)}")
+        filepaths = [f for f in directory.glob(f"{stem}_*{suffix}")]
+        filepaths = [f for f in filepaths if pattern.fullmatch(f.name)]
+        filepaths = sorted(filepaths, key=lambda f: int(f.stem.split('_')[-1]))
+        filepaths.insert(0, base_path)
+        for fp in filepaths:
+            try:
+                fp.unlink()
+            except FileNotFoundError as e:
+                logger.warning(f"File not found during destroy: {fp}")
 
     def recv(self, stream: SnapshotStream):
         """
@@ -224,31 +233,36 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
         # define a helper function to open the file and write the stream in using context manager
         def write_bytes(path: PurePath,
                         bytes_stream: Iterable[bytes],
-                        buffer: bytes = b'') -> Iterable[bytes]:
+                        buffer: bytes = b'') -> Iterable[bytes] | None:
             file_size = 0
             with open(path, 'wb') as handle:
+                # write out the data from the last iteration if passed in
+                if buffer:
+                    handle.write(buffer)
+                    file_size += len(buffer)
+                # write out until out of data or at max file size
                 for chunk in bytes_stream:
-                    buffer += chunk
-                    chunk_size = len(buffer)
+                    chunk_size = len(chunk)
                     if (self.max_file_size is not None) and ((file_size + chunk_size)
                                                              > self.max_file_size):
                         split_index = self.max_file_size - file_size
-                        left, right = buffer[0:split_index], buffer[split_index:]
+                        left, right = chunk[0:split_index], chunk[split_index:]
                         handle.write(left)
                         return right
-                    file_size += len(buffer)
-                    handle.write(buffer)
+                    file_size += len(chunk)
+                    handle.write(chunk)
 
+        # use the write_bytes method to write out data to each file
         file_index = 0
         remaining_bytes = write_bytes(path, stream.bytes_stream)
         while remaining_bytes is not None:
             file_index += 1
-            path = path.with_name(f"{path.stem}_{file_index}{path.suffix}")
-            remaining_bytes = write_bytes(path, stream.bytes_stream, remaining_bytes)
+            next_path = path.with_name(f"{path.stem}_{file_index}{path.suffix}")
+            remaining_bytes = write_bytes(next_path, stream.bytes_stream, remaining_bytes)
 
     def send(self, node: SnapshotNode, blocksize: int = 4096):
         """
-        Send a snapshot file as a stream from the local filesystem.
+        Send a snapshot file as a stream from the local filesystem, including chunked files in order.
 
         Args:
             node (SnapshotNode): The node to send.
@@ -262,16 +276,29 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
             OSError: If there is an OS error during file operations.
         """
         filepath = node.filepath
-        filepath = self.directory.joinpath(filepath)
-        logger.info(f"Sending snapshot file {filepath}")
+        base_path = self.directory.joinpath(filepath)
+        base_path = base_path.resolve()
+        directory = base_path.parent
+        stem = base_path.stem
+        suffix = base_path.suffix
+        logger.info(f"Sending snapshot file(s) for {base_path}")
+
+        # Find all chunked files: base, _1, _2, ...
+        pattern = re.compile(rf"{re.escape(stem)}_\d+{re.escape(suffix)}")
+        filepaths = [f for f in directory.glob(f"{stem}_*{suffix}")]
+        filepaths = [f for f in filepaths if pattern.fullmatch(f.name)]
+        filepaths = sorted(filepaths, key=lambda f: int(f.stem.split('_')[-1]))
+        filepaths.insert(0, base_path)
 
         def _snapshot_stream():
-            with open(filepath, 'rb', buffering=0) as handle:
-                while True:
-                    chunk = handle.read(blocksize)
-                    if not chunk:
-                        break
-                    yield chunk
+            for fp in filepaths:
+                with open(fp, 'rb', buffering=0) as handle:
+                    logger.debug(f"Streaming node = {node} from filepath = {fp}")
+                    while True:
+                        chunk = handle.read(blocksize)
+                        if not chunk:
+                            break
+                        yield chunk
 
         return _snapshot_stream()
 
@@ -285,6 +312,7 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
 
     access_token: str
     directory: PurePath
+    max_file_size: Optional[int] = None
 
     @field_validator('directory')
     @classmethod
@@ -342,44 +370,167 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
 
     def destroy(self, node: SnapshotNode):
         """
-        Delete a snapshot file from Dropbox.
+        Delete a snapshot file and all chunked files from Dropbox.
         """
         dbx = self._client()
-        path = self.directory.joinpath(node.filepath)
-        try:
-            dbx.files_delete_v2(str(path))
-        except dropbox.exceptions.ApiError as e:
-            logger.warning(f"Dropbox file not found during destroy: {path}")
+        base_path = self.directory.joinpath(node.filepath)
+        directory = base_path.parent
+        stem = base_path.stem
+        suffix = base_path.suffix
+        # Find all chunked files: base, _1, _2, ...
+        pattern = re.compile(rf"{re.escape(stem)}_\d+{re.escape(suffix)}")
+
+        # List all files in the directory on Dropbox
+        def list_files(folder):
+            try:
+                res = dbx.files_list_folder(folder)
+            except dropbox.exceptions.ApiError:
+                return []
+            entries = res.entries
+            while res.has_more:
+                res = dbx.files_list_folder_continue(res.cursor)
+                entries.extend(res.entries)
+            return [e for e in entries if isinstance(e, dropbox.files.FileMetadata)]
+
+        files = list_files(str(directory))
+        filepaths = [f for f in files if pattern.fullmatch(PurePath(f.name).name)]
+
+        def get_stem(f):
+            if hasattr(f, 'name'):
+                return PurePath(f.name).stem
+            return PurePath(f).stem
+
+        filepaths = sorted(filepaths,
+                           key=lambda f: int(get_stem(f).split('_')[-1]) if '_' in get_stem(f) else -1)
+        filepaths.insert(0, base_path)
+        for f in filepaths:
+            try:
+                dbx.files_delete_v2(str(f) if not hasattr(f, 'path_display') else f.path_display)
+            except dropbox.exceptions.ApiError as e:
+                logger.warning(f"Dropbox file not found during destroy: {f}")
 
     def recv(self, stream: SnapshotStream):
         """
-        Receive a snapshot stream and upload it to Dropbox.
+        Receive a snapshot stream and upload it to Dropbox, splitting into multiple files if max_file_size is set.
+        Uses Dropbox upload sessions to support streaming large files.
         """
         dbx = self._client()
-        path = str(self.directory.joinpath(stream.node.filepath))
-        # Dropbox API requires bytes, so we need to join the stream
-        buf = BytesIO()
-        for chunk in stream.bytes_stream:
-            buf.write(chunk)
-        buf.seek(0)
-        dbx.files_upload(buf.read(), path, mode=dropbox.files.WriteMode.overwrite)
+        path = self.directory.joinpath(stream.node.filepath)
+        logger.info(f"Receiving snapshot stream to Dropbox at {path}")
+
+        def upload_stream_to_dropbox(path, bytes_stream):
+            CHUNK_SIZE = 4 * 1024 * 1024  # 4MB, Dropbox minimum for session
+            from io import BytesIO
+            chunk_buffer = BytesIO()
+            session_id = None
+            offset = 0
+            for chunk in bytes_stream:
+                chunk_buffer.write(chunk)
+                while chunk_buffer.tell() >= CHUNK_SIZE:
+                    chunk_buffer.seek(0)
+                    data = chunk_buffer.read(CHUNK_SIZE)
+                    if session_id is None:
+                        result = dbx.files_upload_session_start(data)
+                        session_id = result.session_id
+                        offset += len(data)
+                    else:
+                        dbx.files_upload_session_append_v2(
+                            data, dropbox.files.UploadSessionCursor(session_id, offset))
+                        offset += len(data)
+                    # keep any leftover data in buffer
+                    rest = chunk_buffer.read()
+                    chunk_buffer = BytesIO()
+                    chunk_buffer.write(rest)
+            # upload any remaining data and finish
+            chunk_buffer.seek(0)
+            remaining = chunk_buffer.read()
+            if session_id is None:
+                dbx.files_upload(remaining, str(path), mode=dropbox.files.WriteMode.overwrite)
+            else:
+                dbx.files_upload_session_finish(
+                    remaining, dropbox.files.UploadSessionCursor(session_id, offset),
+                    dropbox.files.CommitInfo(str(path), mode=dropbox.files.WriteMode.overwrite))
+
+        file_index = 0
+        remaining_bytes = None
+
+        def chunked_stream(bytes_stream, buffer):
+            if buffer:
+                yield buffer
+            yield from bytes_stream
+
+        # chunking logic for multi-file support
+        while True:
+            if file_index == 0:
+                target_path = path
+            else:
+                target_path = path.with_name(f"{path.stem}_{file_index}{path.suffix}")
+            file_size = 0
+
+            def limited_stream():
+                nonlocal file_size, remaining_bytes
+                for chunk in chunked_stream(stream.bytes_stream if file_index == 0 else [],
+                                            remaining_bytes):
+                    if self.max_file_size is not None and file_size + len(chunk) > self.max_file_size:
+                        split_index = self.max_file_size - file_size
+                        left, right = chunk[:split_index], chunk[split_index:]
+                        file_size += len(left)
+                        remaining_bytes = right
+                        yield left
+                        return
+                    file_size += len(chunk)
+                    yield chunk
+                remaining_bytes = None
+
+            upload_stream_to_dropbox(target_path, limited_stream())
+            if not remaining_bytes:
+                break
+            file_index += 1
 
     def send(self, node: SnapshotNode, blocksize: int = 4096):
         """
-        Download a snapshot file from Dropbox as a stream.
+        Download a snapshot file and all chunked files from Dropbox as a stream.
         """
         dbx = self._client()
-        path = str(self.directory.joinpath(node.filepath))
-        # Download file content into memory (BytesIO)
-        metadata, res = dbx.files_download(path)
-        from io import BytesIO
-        buf = BytesIO(res.content)
+        base_path = self.directory.joinpath(node.filepath)
+        directory = base_path.parent
+        stem = base_path.stem
+        suffix = base_path.suffix
+        # Find all chunked files: base, _1, _2, ...
+        pattern = re.compile(rf"{re.escape(stem)}_\d+{re.escape(suffix)}")
+
+        def list_files(folder):
+            try:
+                res = dbx.files_list_folder(folder)
+            except dropbox.exceptions.ApiError:
+                return []
+            entries = res.entries
+            while res.has_more:
+                res = dbx.files_list_folder_continue(res.cursor)
+                entries.extend(res.entries)
+            return [e for e in entries if isinstance(e, dropbox.files.FileMetadata)]
+
+        files = list_files(str(directory))
+        files = list_files(str(directory))
+        filepaths = [f for f in files if pattern.fullmatch(PurePath(f.name).name)]
+        filepaths = sorted(filepaths, key=lambda f: int(f.stem.split('_')[-1]))
+        # Insert the base file at the start
+        filepaths.insert(0, base_path)
 
         def _snapshot_stream():
-            while True:
-                chunk = buf.read(blocksize)
-                if not chunk:
-                    break
-                yield chunk
+            for f in filepaths:
+                # f may be a Dropbox FileMetadata or a PurePath, handle both
+                if hasattr(f, 'path_display'):
+                    path_str = f.path_display
+                else:
+                    path_str = str(f)
+                metadata, res = dbx.files_download(path_str)
+                from io import BytesIO
+                buf = BytesIO(res.content)
+                while True:
+                    chunk = buf.read(blocksize)
+                    if not chunk:
+                        break
+                    yield chunk
 
         return _snapshot_stream()
