@@ -4,18 +4,19 @@ This module provides concrete implementations of the SnapshotStorageAdapter inte
 for different storage backends. Currently supports local filesystem storage.
 """
 
+import re
 import dropbox
 import logging
 from io import BytesIO
 from pathlib import Path, PurePath
-from typing import Optional
+from typing import Optional, Iterable
 from itertools import groupby
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from pyzync.errors import DataIntegrityError
 from pyzync.interfaces import (SnapshotStorageAdapter, SnapshotStream, DuplicateDetectedPolicy,
-                               DATETIME_REGEX, ZfsDatasetId, ZfsFilePath, SnapshotNode, SnapshotGraph)
+                               ZfsDatasetId, ZfsFilePath, SnapshotNode, SnapshotGraph)
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +139,7 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
     model_config = ConfigDict(frozen=True)
 
     directory: Path
+    max_file_size: Optional[int] = None
 
     @field_validator('directory')
     @classmethod
@@ -168,18 +170,21 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
         # query all the .zfs files at the root and below
         logger.debug(f"Querying snapshot files in {self.directory} for {dataset_id}")
         glob_pattern = "*.zfs" if dataset_id is None else f"**/{dataset_id}/*.zfs"
-        matches = [fp for fp in self.directory.rglob(glob_pattern)]
+        matches = {fp for fp in self.directory.rglob(glob_pattern)}
+        matches = {r.relative_to(self.directory) for r in matches}
+        pattern = re.compile('_d+.zfs')
 
         def filt(results):
-            matches = []
+            matches = set()
+            # pattern = ZfsDatasetId._pattern
             for r in results:
                 try:
-                    matches.append(ZfsFilePath(str(r)))
+                    # if the stream was chunked, strip the _1 before the.zfs
+                    matches.add(ZfsFilePath(str(r)))
                 except ValueError:
                     pass
             return matches
 
-        matches = [r.relative_to(self.directory) for r in matches]
         matches = filt(matches)
         return matches
 
@@ -200,13 +205,10 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
 
     def recv(self, stream: SnapshotStream):
         """
-        Receive a snapshot stream and write it to the local filesystem.
+        Receive a snapshot stream and write it to the local filesystem, splitting into multiple files if max_file_size is set.
 
         Args:
             stream (SnapshotStream): The snapshot stream to receive.
-
-        Returns:
-            Path: The path to the written file.
 
         Raises:
             FileNotFoundError: If the parent directory cannot be created or file cannot be written.
@@ -216,11 +218,33 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
         logger.info(f"Receiving snapshot stream to {path}")
         # create the parent dirs if they don't exist
         if not path.parent.exists():
+            logger.debug(f"Creating parent directories {path}")
             path.parent.mkdir(parents=True)
-        # open the file and write the stream in
-        with open(path, 'wb') as handle:
-            for chunk in stream.bytes_stream:
-                handle.write(chunk)
+
+        # define a helper function to open the file and write the stream in using context manager
+        def write_bytes(path: PurePath,
+                        bytes_stream: Iterable[bytes],
+                        buffer: bytes = b'') -> Iterable[bytes]:
+            file_size = 0
+            with open(path, 'wb') as handle:
+                for chunk in bytes_stream:
+                    buffer += chunk
+                    chunk_size = len(buffer)
+                    if (self.max_file_size is not None) and ((file_size + chunk_size)
+                                                             > self.max_file_size):
+                        split_index = self.max_file_size - file_size
+                        left, right = buffer[0:split_index], buffer[split_index:]
+                        handle.write(left)
+                        return right
+                    file_size += len(buffer)
+                    handle.write(buffer)
+
+        file_index = 0
+        remaining_bytes = write_bytes(path, stream.bytes_stream)
+        while remaining_bytes is not None:
+            file_index += 1
+            path = path.with_name(f"{path.stem}_{file_index}{path.suffix}")
+            remaining_bytes = write_bytes(path, stream.bytes_stream, remaining_bytes)
 
     def send(self, node: SnapshotNode, blocksize: int = 4096):
         """
