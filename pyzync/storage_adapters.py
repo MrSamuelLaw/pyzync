@@ -420,15 +420,13 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
 
         def upload_stream_to_dropbox(path, bytes_stream):
             CHUNK_SIZE = 4 * 1024 * 1024  # 4MB, Dropbox minimum for session
-            from io import BytesIO
-            chunk_buffer = BytesIO()
             session_id = None
             offset = 0
+            buffer = b''
             for chunk in bytes_stream:
-                chunk_buffer.write(chunk)
-                while chunk_buffer.tell() >= CHUNK_SIZE:
-                    chunk_buffer.seek(0)
-                    data = chunk_buffer.read(CHUNK_SIZE)
+                buffer += chunk
+                while len(buffer) >= CHUNK_SIZE:
+                    data, buffer = buffer[:CHUNK_SIZE], buffer[CHUNK_SIZE:]
                     if session_id is None:
                         result = dbx.files_upload_session_start(data)
                         session_id = result.session_id
@@ -437,18 +435,12 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
                         dbx.files_upload_session_append_v2(
                             data, dropbox.files.UploadSessionCursor(session_id, offset))
                         offset += len(data)
-                    # keep any leftover data in buffer
-                    rest = chunk_buffer.read()
-                    chunk_buffer = BytesIO()
-                    chunk_buffer.write(rest)
             # upload any remaining data and finish
-            chunk_buffer.seek(0)
-            remaining = chunk_buffer.read()
             if session_id is None:
-                dbx.files_upload(remaining, str(path), mode=dropbox.files.WriteMode.overwrite)
+                dbx.files_upload(buffer, str(path), mode=dropbox.files.WriteMode.overwrite)
             else:
                 dbx.files_upload_session_finish(
-                    remaining, dropbox.files.UploadSessionCursor(session_id, offset),
+                    buffer, dropbox.files.UploadSessionCursor(session_id, offset),
                     dropbox.files.CommitInfo(str(path), mode=dropbox.files.WriteMode.overwrite))
 
         file_index = 0
