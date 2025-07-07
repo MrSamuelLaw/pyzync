@@ -4,10 +4,10 @@ This module provides concrete implementations of the SnapshotStorageAdapter inte
 for different storage backends. Currently supports local filesystem storage.
 """
 
+import os
 import re
 import dropbox
 import logging
-from io import BytesIO
 from pathlib import Path, PurePath
 from typing import Optional, Iterable
 from itertools import groupby
@@ -310,8 +310,11 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    access_token: str
+    key: str
+    secret: str
+    refresh_token: str
     directory: PurePath
+    access_token: Optional[str] = None
     max_file_size: Optional[int] = None
 
     @field_validator('directory')
@@ -331,7 +334,21 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
         return directory
 
     def _client(self):
-        return dropbox.Dropbox(self.access_token)
+        # Prefer refresh token if available, else fall back to access token
+        refresh_token = os.environ.get("DROPBOX_REFRESH_TOKEN")
+        app_key = os.environ.get("DROPBOX_KEY")
+        app_secret = os.environ.get("DROPBOX_SECRET")
+        access_token = os.environ.get("DROPBOX_TOKEN")
+        if refresh_token and app_key and app_secret:
+            return dropbox.Dropbox(oauth2_refresh_token=refresh_token,
+                                   app_key=app_key,
+                                   app_secret=app_secret)
+        elif access_token:
+            return dropbox.Dropbox(access_token)
+        else:
+            raise RuntimeError(
+                "Dropbox credentials not found. Set DROPBOX_REFRESH_TOKEN, DROPBOX_KEY, DROPBOX_SECRET or DROPBOX_TOKEN in your environment."
+            )
 
     def query(self, dataset_id: Optional[ZfsDatasetId] = None):
         """

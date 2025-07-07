@@ -293,7 +293,9 @@ class TestDropboxLoopCheck(unittest.TestCase):
         """
         dataset_id = 'tank0/foo'
         adapter = DropboxStorageAdapter(directory=environ["DROPBOX_DIR"],
-                                        access_token=environ["DROPBOX_TOKEN"],
+                                        key=environ['DROPBOX_KEY'],
+                                        secret=environ['DROPBOX_SECRET'],
+                                        refresh_token=environ["DROPBOX_REFRESH_TOKEN"],
                                         max_file_size=4E+6)
         manager = RemoteSnapshotManager(adapter=adapter)
 
