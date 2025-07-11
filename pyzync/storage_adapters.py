@@ -260,7 +260,7 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
             next_path = path.with_name(f"{path.stem}_{file_index}{path.suffix}")
             remaining_bytes = write_bytes(next_path, stream.bytes_stream, remaining_bytes)
 
-    def send(self, node: SnapshotNode, blocksize: int = 4096):
+    def send(self, node: SnapshotNode, blocksize: int = 2**20):  # default blocksize = 1MB
         """
         Send a snapshot file as a stream from the local filesystem, including chunked files in order.
 
@@ -496,7 +496,7 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
                 break
             file_index += 1
 
-    def send(self, node: SnapshotNode, blocksize: int = 4096):
+    def send(self, node: SnapshotNode, blocksize: int = 2**20):
         """
         Download a snapshot file and all chunked files from Dropbox as a stream.
         """

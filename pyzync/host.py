@@ -142,12 +142,13 @@ class HostSnapshotManager:
 
     @staticmethod
     @validate_call
-    def send(dt: Datetime,
-             graph: SnapshotGraph,
-             parent_dt: Optional[Datetime] = None,
-             zfs_args: list[str] = [],
-             blocksize: int = 4096,
-             dryrun: bool = False):
+    def send(
+            dt: Datetime,
+            graph: SnapshotGraph,
+            parent_dt: Optional[Datetime] = None,
+            zfs_args: list[str] = [],
+            blocksize: int = 2**20,  # 1 MB
+            dryrun: bool = False):
         """
         Send a snapshot or incremental snapshot as a stream.
 
@@ -197,8 +198,10 @@ class HostSnapshotManager:
                 cmd.append(node.snapshot_id)
 
                 # using a context manager, build an unbuffered generator to stream the data
-                with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                      bufsize=0) as process:
+                with subprocess.Popen(cmd,
+                                      stdout=subprocess.PIPE,
+                                      stderr=subprocess.PIPE,
+                                      bufsize=blocksize) as process:
                     # check to make sure the pipe is open
                     if process.stdout is None:
                         raise RuntimeError("Failed to open stdout for the subprocess")
