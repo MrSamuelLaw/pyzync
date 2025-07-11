@@ -1,10 +1,16 @@
+# ignore cache and venv
 __pycache__/
-/dev
 **/*.venv
+# ignore user env file
 .env
+# ignore vscode specific files
 .vscode
+# ignore files that my contain user specific information
 backup.py
 backup.sh
 backup.log
+# ignore development files
+dev
+# ignore auto created testing files
 tests/test_loop_check_files/
 tests/test_backup_files/
