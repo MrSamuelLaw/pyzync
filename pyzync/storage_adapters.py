@@ -123,12 +123,20 @@ class RemoteSnapshotManager(BaseModel):
             dryrun (bool, optional): If True, do not perform actual operations. Defaults to False.
             duplicate_policy (DuplicateDetectedPolicy, optional): Policy for handling duplicates. Defaults to 'error'.
         """
-        logger.info(f'Receiveing stream for node = {stream.node}')
+        logger.info(f'Receiving stream for node = {stream.node}')
         is_duplicate = stream.node in graph.get_nodes()
         if (not is_duplicate) or (is_duplicate and duplicate_policy == 'error'):
             graph.add(stream.node)
         if (not dryrun) and ((not is_duplicate) or (is_duplicate and duplicate_policy == 'overwrite')):
             self.adapter.recv(stream)
+
+    def subscribe(self, stream: SnapshotStream, graph: SnapshotGraph, dryrun: bool = False):
+        logger.info(f'Subscribing to stream for node = {stream.node}')
+        is_duplicate = stream.node in graph.get_nodes()
+        if is_duplicate:
+            raise ValueError(f'Cannot subscribe to a stream for duplicate node = {stream.node}')
+        graph.add(stream.node)
+        self.adapter.subscribe(stream)
 
 
 class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
@@ -260,6 +268,52 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
             next_path = path.with_name(f"{path.stem}_{file_index}{path.suffix}")
             remaining_bytes = write_bytes(next_path, stream.bytes_stream, remaining_bytes)
 
+    def subscribe(self, stream: SnapshotStream):
+        # build a function that can handle a single chunck
+        path = self.directory.joinpath(stream.node.filepath)
+        logger.debug(f"Subscribing for stream = {stream} to path = {path}")
+        # create the parent dirs if they don't exist
+        if not path.parent.exists():
+            logger.debug(f"Creating parent directories {path}")
+            path.parent.mkdir(parents=True)
+
+        # define a helper function to open the file and write the stream in using context manager
+        def consume_bytes(path: PurePath):
+            file_size = 0
+            file_index = 0
+            cur_path = path
+            try:
+                handle = open(cur_path, 'wb')
+                while True:
+                    chunk = yield
+                    if chunk is None:
+                        break
+
+                    # write out until out of data or at max file size, then start a new file
+                    chunk_size = len(chunk)
+                    if (self.max_file_size is not None) and ((file_size + chunk_size)
+                                                             > self.max_file_size):
+                        split_index = self.max_file_size - file_size
+                        left, right = chunk[0:split_index], chunk[split_index:]
+                        handle.write(left)
+                        handle.close()
+                        file_index += 1
+                        cur_path = path.with_name(f"{path.stem}_{file_index}{cur_path.suffix}")
+                        handle = open(cur_path, 'wb')
+                        file_size = len(right)
+                        handle.write(right)
+                    file_size += len(chunk)
+                    handle.write(chunk)
+            except IOError as e:
+                logger.exception(f"Error writing to {cur_path}: {e}")
+            finally:
+                if handle:
+                    handle.close()
+
+        consumer = consume_bytes(path=path)
+        next(consumer)
+        stream.register(consumer)
+
     def send(self, node: SnapshotNode, blocksize: int = 2**20):  # default blocksize = 1MB
         """
         Send a snapshot file as a stream from the local filesystem, including chunked files in order.
@@ -310,10 +364,10 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    key: str
-    secret: str
-    refresh_token: str
     directory: PurePath
+    key: Optional[str] = None
+    secret: Optional[str] = None
+    refresh_token: Optional[str] = None
     access_token: Optional[str] = None
     max_file_size: Optional[int] = None
 
@@ -495,6 +549,106 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
             if not remaining_bytes:
                 break
             file_index += 1
+
+    def subscribe(self, stream: SnapshotStream):
+        """Subscribe to a snapshot stream and handle incoming chunks for Dropbox upload.
+        
+        Args:
+            stream (SnapshotStream): The snapshot stream to subscribe to.
+        """
+        path = self.directory.joinpath(stream.node.filepath)
+        logger.debug(f"Subscribing for stream = {stream} to path = {path}")
+
+        def consume_bytes(path: PurePath):
+            dbx = self._client()
+            file_size = 0
+            file_index = 0
+            cur_path = path
+            session_id = None
+            offset = 0
+            buffer = b''
+            MIN_CHUNK_SIZE = 4 * 1024 * 1024  # 4MB Dropbox minimum for upload sessions
+
+            try:
+                while True:
+                    chunk = yield
+                    if chunk is None:
+                        break
+
+                    buffer += chunk
+                    while len(buffer) >= MIN_CHUNK_SIZE:
+                        # Calculate how much data we can write in this iteration
+                        max_chunk = min(
+                            len(buffer),  # Don't take more than we have
+                            MIN_CHUNK_SIZE,  # Don't exceed Dropbox's minimum chunk size
+                            float('inf') if self.max_file_size is None else  # No max file size limit
+                            self.max_file_size - file_size  # Space remaining in current file
+                        )
+
+                        # If we hit the file size limit, start a new file
+                        if max_chunk < MIN_CHUNK_SIZE and len(buffer) >= MIN_CHUNK_SIZE:
+                            # Upload whatever we have in the current session
+                            if session_id is None:
+                                dbx.files_upload(buffer[:max_chunk],
+                                                 str(cur_path),
+                                                 mode=dropbox.files.WriteMode.overwrite)
+                            else:
+                                dbx.files_upload_session_finish(
+                                    buffer[:max_chunk],
+                                    dropbox.files.UploadSessionCursor(session_id, offset),
+                                    dropbox.files.CommitInfo(str(cur_path),
+                                                             mode=dropbox.files.WriteMode.overwrite))
+
+                            # Start new file
+                            file_index += 1
+                            cur_path = path.with_name(f"{path.stem}_{file_index}{cur_path.suffix}")
+                            session_id = None
+                            offset = 0
+                            file_size = 0
+                            continue
+
+                        # Split buffer and process the chunk
+                        data, buffer = buffer[:max_chunk], buffer[max_chunk:]
+
+                        # Normal upload progress
+                        if session_id is None:
+                            if len(buffer) >= MIN_CHUNK_SIZE or chunk is None:
+                                # Start new session
+                                result = dbx.files_upload_session_start(data)
+                                session_id = result.session_id
+                                offset = len(data)
+                            else:
+                                # Small file, direct upload
+                                dbx.files_upload(data,
+                                                 str(cur_path),
+                                                 mode=dropbox.files.WriteMode.overwrite)
+                        else:
+                            # Continue existing session
+                            dbx.files_upload_session_append_v2(
+                                data, dropbox.files.UploadSessionCursor(session_id, offset))
+                            offset += len(data)
+                        file_size += len(data)
+
+                # Upload any remaining data
+                if buffer:
+                    if session_id is None:
+                        dbx.files_upload(buffer, str(cur_path), mode=dropbox.files.WriteMode.overwrite)
+                    else:
+                        dbx.files_upload_session_finish(
+                            buffer, dropbox.files.UploadSessionCursor(session_id, offset),
+                            dropbox.files.CommitInfo(str(cur_path),
+                                                     mode=dropbox.files.WriteMode.overwrite))
+
+            except dropbox.exceptions.ApiError as e:
+                logger.exception(f"Dropbox API error while uploading to {cur_path}: {e}")
+                raise
+            except Exception as e:
+                logger.exception(f"Error while uploading to {cur_path}: {e}")
+                raise
+
+        consumer = consume_bytes(path=path)
+        next(consumer)  # Prime the generator
+        stream.register(consumer)
 
     def send(self, node: SnapshotNode, blocksize: int = 2**20):
         """

@@ -3,7 +3,7 @@ from itertools import chain
 from collections import defaultdict
 from abc import ABC, abstractmethod
 from datetime import datetime, tzinfo
-from typing import Self, Iterable, Optional, Literal, overload, Any, TypeAlias
+from typing import (Self, Iterable, Generator, Optional, Literal, overload, Any, TypeAlias)
 
 from pydantic import (BaseModel, model_validator, computed_field, ConfigDict, GetCoreSchemaHandler,
                       validate_call)
@@ -352,6 +352,9 @@ class SnapshotGraph(BaseModel):
             raise ValueError(f'Unable to remove node = {node}, it does not exist in the graph')
 
 
+BytesConsumer: TypeAlias = Generator[None, bytes, None]
+
+
 class SnapshotStream(BaseModel):
     """
     Represents a stream of snapshot data for transfer.
@@ -361,12 +364,27 @@ class SnapshotStream(BaseModel):
 
     node: SnapshotNode
     bytes_stream: Iterable[bytes]
+    _consumers: set[BytesConsumer] = set()
 
     def __str__(self):
         """
         Return a string representation of the snapshot stream.
         """
         return f"SnapshotStream(node={self.node.snapshot_id}, filepath={self.node.filepath})"
+
+    def register(self, consumer: BytesConsumer):
+        self._consumers.add(consumer)
+
+    def publish(self):
+        for chunk in self.bytes_stream:
+            for consumer in self._consumers:
+                consumer.send(chunk)
+        # send None to have the consumer do any clean up operations
+        for consumer in self._consumers:
+            try:
+                consumer.send(None)
+            except StopIteration:
+                pass
 
 
 class SnapshotStorageAdapter(ABC):

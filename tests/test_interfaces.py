@@ -222,6 +222,27 @@ class TestSnapshotStream(unittest.TestCase):
         stream = SnapshotStream(node=node, bytes_stream=(x for x in b'somebytes'))
         self.assertEqual(stream.node, node)
 
+    def test_can_register_and_publish(self):
+
+        context = 0
+
+        def consumer():
+            nonlocal context
+            while True:
+                chunk = yield
+                if chunk is None:
+                    break
+                context += 1
+
+        consumer = consumer()
+        next(consumer)
+
+        node = SnapshotNode(dataset_id='tank0/foo', dt='20250505T120000')
+        stream = SnapshotStream(node=node, bytes_stream=(bytes(x) for x in b'0123456789'))
+        stream.register(consumer)
+        stream.publish()
+        self.assertEqual(context, 10)
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

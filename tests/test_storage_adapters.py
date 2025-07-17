@@ -110,12 +110,6 @@ class TestFileSnapshotManager(unittest.TestCase):
         self.assertFalse(graph.get_orphans())
         self.assertFalse(nodes[1] in graph.get_nodes())
 
-    # def test_can_recv_a_stream_into_chunks(self):
-    #     self.assertTrue(False)
-
-    # def test_can_query_chunked_streams(self):
-    #     self.assertTrue(False)
-
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

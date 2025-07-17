@@ -250,7 +250,13 @@ class HostSnapshotManager:
             Exception: For other errors during receive.
         """
         logger.info(f"Receiving snapshot stream for {stream}")
-        graph.add(stream.node)
+        # make sure to recieve as a non-incremental node into the graph
+        if stream.node.node_type == 'complete':
+            graph.add(stream.node)
+        else:
+            data = stream.node.model_dump()
+            del data['parent_dt']
+            graph.add(SnapshotNode(**data))
         # Use only the dataset name for zfs recv target
         cmd = ["zfs", "recv", *zfs_args, stream.node.dataset_id]
         if not dryrun:

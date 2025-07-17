@@ -19,7 +19,7 @@ class TestLocalFileLoopCheck(unittest.TestCase):
 
         # get an instance of the adapter
         directory = Path(__file__).resolve().parent
-        directory = directory.joinpath('test_loop_check_files')
+        directory = directory.joinpath('test_loop_check_files/one')
         adapter = LocalFileStorageAdapter(directory=directory)
         manager = RemoteSnapshotManager(adapter=adapter)
 
@@ -91,7 +91,7 @@ class TestLocalFileLoopCheck(unittest.TestCase):
 
         # get an instance of the adapter
         directory = Path(__file__).resolve().parent
-        directory = directory.joinpath('test_loop_check_files')
+        directory = directory.joinpath('test_loop_check_files/two')
         adapter = LocalFileStorageAdapter(directory=directory, max_file_size=2**12)
         manager = RemoteSnapshotManager(adapter=adapter)
 
@@ -157,6 +157,92 @@ class TestLocalFileLoopCheck(unittest.TestCase):
         self.assertTrue(path.exists())
         path.unlink()
 
+    def test_stream_using_pubsub(self):
+        """Test that ensures that data is able to be stored in chunks and restored
+        using the pubsub method
+        """
+
+        # get an instance of the adapter
+        directory = Path(__file__).resolve().parent
+        directory1 = directory.joinpath('test_loop_check_files/three')
+        adapter = LocalFileStorageAdapter(directory=directory1, max_file_size=2**12)
+        manager0 = RemoteSnapshotManager(adapter=adapter)
+        directory0 = directory.joinpath('test_loop_check_files/four')
+        adapter = LocalFileStorageAdapter(directory=directory0, max_file_size=2**12)
+        manager1 = RemoteSnapshotManager(adapter=adapter)
+
+        # clean up any lingering files
+        dataset_id = 'tank0/foo'
+        graphs = manager0.query(dataset_id)
+        remote_graph0 = graphs[0] if graphs else SnapshotGraph(dataset_id=dataset_id)
+        [manager0.destroy(n, remote_graph0, force=True) for n in remote_graph0.get_nodes()]
+        graphs = manager1.query(dataset_id)
+        remote_graph1 = graphs[0] if graphs else SnapshotGraph(dataset_id=dataset_id)
+        [manager1.destroy(n, remote_graph1, force=True) for n in remote_graph1.get_nodes()]
+
+        # query snapshots that are related to the file system
+        graphs = HostSnapshotManager.query(dataset_id)
+        host_graph = graphs[0] if graphs else SnapshotGraph(dataset_id=dataset_id)
+        [HostSnapshotManager.destroy(node, host_graph) for node in host_graph.get_nodes()]
+
+        # # case 1 from the node_diagram
+        datetimes = [
+            '20250122T120000',
+            '20250123T120000',
+            '20250124T120000',
+            '20250125T120000',
+            '20250126T120000',
+        ]
+        # add a fake file for testing for each date
+        nodes = []
+        for dt in datetimes:
+            path = Path(f'/tank0/foo/{dt}.txt')
+            path.touch(exist_ok=True)
+            nodes.append(HostSnapshotManager.create(dt, host_graph))
+            path.unlink()
+
+        # create the first complete stream
+        chain = sorted(list(host_graph.get_nodes()), key=lambda node: node.dt)
+        streams = [HostSnapshotManager.send(chain[0].dt, host_graph)]
+
+        # create the incremental streams
+        streams.extend(
+            [HostSnapshotManager.send(n.dt, host_graph, p.dt) for n, p in zip(chain[1:], chain)])
+
+        # send those streams to local storage
+        for stream in streams:
+            for manager, graph in ((manager0, remote_graph0), (manager1, remote_graph1)):
+                manager.subscribe(stream, graph)
+            stream.publish()
+
+        # verify the ref is queryable now that it exists
+        graph = manager0.query(dataset_id)[0]
+        self.assertEqual(graph.get_nodes(), remote_graph0.get_nodes())
+        graph = manager1.query(dataset_id)[0]
+        self.assertEqual(graph.get_nodes(), remote_graph1.get_nodes())
+
+        for manager, graph in ((manager0, remote_graph0), (manager1, remote_graph1)):
+            # destroy the snapshots from the host
+            for node in chain:
+                HostSnapshotManager.destroy(node, host_graph)
+
+            # verify that the dataset is empty
+            path = Path('/tank0/foo')
+            self.assertFalse(any(path.iterdir()))
+
+            # restore the files in order and check that the directory contains the file expected
+            chain_ = remote_graph0.get_chains()[0]
+            streams = [manager.send(n, graph) for n in chain_]
+            for stream, dt in zip(streams, datetimes):
+                HostSnapshotManager.recv(stream, host_graph, zfs_args=['-F'])
+                path = Path(f'/tank0/foo/{dt}.txt')
+                self.assertTrue(path.exists())
+
+            # verify that every snapshot was received
+            path = Path(f'/tank0/foo/{datetimes[-1]}.txt')
+            self.assertTrue(path.exists())
+            path.unlink()
+
     def test_can_use_backup_job(self):
         # define the backup config for each job
         directory = Path(__file__).resolve().parent
@@ -221,8 +307,7 @@ class TestDropboxLoopCheck(unittest.TestCase):
         and used to recover lost data.
         """
         dataset_id = 'tank0/foo'
-        adapter = DropboxStorageAdapter(directory=environ["DROPBOX_DIR"],
-                                        access_token=environ["DROPBOX_TOKEN"])
+        adapter = DropboxStorageAdapter(directory='/pyzync/one', access_token=environ["DROPBOX_TOKEN"])
         manager = RemoteSnapshotManager(adapter=adapter)
 
         # clean up any lingering files
@@ -292,10 +377,11 @@ class TestDropboxLoopCheck(unittest.TestCase):
         and used to recover lost data.
         """
         dataset_id = 'tank0/foo'
-        adapter = DropboxStorageAdapter(directory=environ["DROPBOX_DIR"],
-                                        key=environ['DROPBOX_KEY'],
-                                        secret=environ['DROPBOX_SECRET'],
-                                        refresh_token=environ["DROPBOX_REFRESH_TOKEN"],
+        adapter = DropboxStorageAdapter(directory='/pyzync/two',
+                                        key=environ.get('DROPBOX_KEY'),
+                                        secret=environ.get('DROPBOX_SECRET'),
+                                        refresh_token=environ.get("DROPBOX_REFRESH_TOKEN"),
+                                        access_token=environ.get("DROPBOX_TOKEN"),
                                         max_file_size=4E+6)
         manager = RemoteSnapshotManager(adapter=adapter)
 
@@ -360,3 +446,97 @@ class TestDropboxLoopCheck(unittest.TestCase):
         path = Path(f'/tank0/foo/{datetimes[-1]}.txt')
         self.assertTrue(path.exists())
         path.unlink()
+
+    def test_stream_using_pubsub(self):
+        """Test that ensures that data is able to be stored in chunks and restored
+        using the pubsub method
+        """
+
+        # get an instance of the adapter
+        directory = Path(__file__).resolve().parent
+        adapter = DropboxStorageAdapter(directory='/pyzync/three',
+                                        key=environ.get('DROPBOX_KEY'),
+                                        secret=environ.get('DROPBOX_SECRET'),
+                                        refresh_token=environ.get("DROPBOX_REFRESH_TOKEN"),
+                                        access_token=environ.get("DROPBOX_TOKEN"),
+                                        max_file_size=4E+6)
+        manager0 = RemoteSnapshotManager(adapter=adapter)
+        adapter = DropboxStorageAdapter(directory='/pyzync/four',
+                                        key=environ.get('DROPBOX_KEY'),
+                                        secret=environ.get('DROPBOX_SECRET'),
+                                        refresh_token=environ.get("DROPBOX_REFRESH_TOKEN"),
+                                        access_token=environ.get("DROPBOX_TOKEN"),
+                                        max_file_size=4E+6)
+        manager1 = RemoteSnapshotManager(adapter=adapter)
+
+        # clean up any lingering files
+        dataset_id = 'tank0/foo'
+        graphs = manager0.query(dataset_id)
+        remote_graph0 = graphs[0] if graphs else SnapshotGraph(dataset_id=dataset_id)
+        [manager0.destroy(n, remote_graph0, force=True) for n in remote_graph0.get_nodes()]
+        graphs = manager1.query(dataset_id)
+        remote_graph1 = graphs[0] if graphs else SnapshotGraph(dataset_id=dataset_id)
+        [manager1.destroy(n, remote_graph1, force=True) for n in remote_graph1.get_nodes()]
+
+        # query snapshots that are related to the file system
+        graphs = HostSnapshotManager.query(dataset_id)
+        host_graph = graphs[0] if graphs else SnapshotGraph(dataset_id=dataset_id)
+        [HostSnapshotManager.destroy(node, host_graph) for node in host_graph.get_nodes()]
+
+        # # case 1 from the node_diagram
+        datetimes = [
+            '20250122T120000',
+            '20250123T120000',
+            '20250124T120000',
+            '20250125T120000',
+            '20250126T120000',
+        ]
+        # add a fake file for testing for each date
+        nodes = []
+        for dt in datetimes:
+            path = Path(f'/tank0/foo/{dt}.txt')
+            path.touch(exist_ok=True)
+            nodes.append(HostSnapshotManager.create(dt, host_graph))
+            path.unlink()
+
+        # create the first complete stream
+        chain = sorted(list(host_graph.get_nodes()), key=lambda node: node.dt)
+        streams = [HostSnapshotManager.send(chain[0].dt, host_graph)]
+
+        # create the incremental streams
+        streams.extend(
+            [HostSnapshotManager.send(n.dt, host_graph, p.dt) for n, p in zip(chain[1:], chain)])
+
+        # send those streams to local storage
+        for stream in streams:
+            for manager, graph in ((manager0, remote_graph0), (manager1, remote_graph1)):
+                manager.subscribe(stream, graph)
+            stream.publish()
+
+        # verify the ref is queryable now that it exists
+        graph = manager0.query(dataset_id)[0]
+        self.assertEqual(graph.get_nodes(), remote_graph0.get_nodes())
+        graph = manager1.query(dataset_id)[0]
+        self.assertEqual(graph.get_nodes(), remote_graph1.get_nodes())
+
+        for manager, graph in ((manager0, remote_graph0), (manager1, remote_graph1)):
+            # destroy the snapshots from the host
+            for node in chain:
+                HostSnapshotManager.destroy(node, host_graph)
+
+            # verify that the dataset is empty
+            path = Path('/tank0/foo')
+            self.assertFalse(any(path.iterdir()))
+
+            # restore the files in order and check that the directory contains the file expected
+            chain_ = remote_graph0.get_chains()[0]
+            streams = [manager.send(n, graph) for n in chain_]
+            for stream, dt in zip(streams, datetimes):
+                HostSnapshotManager.recv(stream, host_graph, zfs_args=['-F'])
+                path = Path(f'/tank0/foo/{dt}.txt')
+                self.assertTrue(path.exists())
+
+            # verify that every snapshot was received
+            path = Path(f'/tank0/foo/{datetimes[-1]}.txt')
+            self.assertTrue(path.exists())
+            path.unlink()
