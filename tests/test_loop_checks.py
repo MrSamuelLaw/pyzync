@@ -279,7 +279,7 @@ class TestLocalFileLoopCheck(unittest.TestCase):
         for dataset_id, job in config.items():
             for dt in datetimes:
                 job.rotate(dataset_id, dt=dt)
-                job.sync(dataset_id)
+                job.sync(dataset_id, duplicate_policy='overwrite')
 
         # verify the expected files exist
         dataset_id = 'tank0/bar'

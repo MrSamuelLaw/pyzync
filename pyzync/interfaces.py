@@ -419,3 +419,10 @@ class SnapshotStorageAdapter(ABC):
         Receive a snapshot stream and store it.
         """
         pass
+
+    @abstractmethod
+    def subscribe(self, stream: SnapshotStream):
+        """
+        Registers a generator with the stream for iteration of each chunk
+        """
+        pass

@@ -125,17 +125,27 @@ class RemoteSnapshotManager(BaseModel):
         """
         logger.info(f'Receiving stream for node = {stream.node}')
         is_duplicate = stream.node in graph.get_nodes()
-        if (not is_duplicate) or (is_duplicate and duplicate_policy == 'error'):
+        if not is_duplicate:
             graph.add(stream.node)
-        if (not dryrun) and ((not is_duplicate) or (is_duplicate and duplicate_policy == 'overwrite')):
-            self.adapter.recv(stream)
+        elif duplicate_policy == 'error':
+            raise ValueError(
+                f'Cannot recv stream = {stream} duplicate node = {stream.node} for adapter = {self.adapter}'
+            )
+        self.adapter.recv(stream)
 
-    def subscribe(self, stream: SnapshotStream, graph: SnapshotGraph, dryrun: bool = False):
+    def subscribe(self,
+                  stream: SnapshotStream,
+                  graph: SnapshotGraph,
+                  dryrun: bool = False,
+                  duplicate_policy: DuplicateDetectedPolicy = 'error'):
         logger.info(f'Subscribing to stream for node = {stream.node}')
         is_duplicate = stream.node in graph.get_nodes()
-        if is_duplicate:
-            raise ValueError(f'Cannot subscribe to a stream for duplicate node = {stream.node}')
-        graph.add(stream.node)
+        if not is_duplicate:
+            graph.add(stream.node)
+        elif duplicate_policy == 'error':
+            raise ValueError(
+                f'Cannot subscribe to stream = {stream} duplicate node = {stream.node} for adapter = {self.adapter}'
+            )
         self.adapter.subscribe(stream)
 
 

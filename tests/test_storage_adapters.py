@@ -27,6 +27,9 @@ class FakeStorageAdapter(SnapshotStorageAdapter):
     def recv(self, *args, **kwargs):
         pass
 
+    def subscribe(self, stream):
+        pass
+
 
 class TestFileSnapshotManager(unittest.TestCase):
 
