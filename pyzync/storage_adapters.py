@@ -583,7 +583,7 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
             return [e for e in entries if isinstance(e, dropbox.files.FileMetadata)]
 
         files = list_files(str(directory))
-        filepaths = [PurePath(f) for f in files if pattern.fullmatch(PurePath(f.name).name)]
+        filepaths = [PurePath(f.name) for f in files if pattern.fullmatch(PurePath(f.name).name)]
         filepaths = sorted(filepaths, key=lambda f: int(f.stem.split('_')[-1]))
         filepaths.insert(0, base_path)
         for f in filepaths:
