@@ -20,6 +20,10 @@ from pyzync.interfaces import (SnapshotStorageAdapter, SnapshotStream, Duplicate
 
 logger = logging.getLogger(__name__)
 
+# Configure Dropbox SDK logging to only show warnings and above
+dropbox_logger = logging.getLogger('dropbox')
+dropbox_logger.setLevel(logging.WARNING)
+
 
 class RemoteSnapshotManager(BaseModel):
     """
