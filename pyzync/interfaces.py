@@ -1,4 +1,5 @@
 import re
+import threading
 from itertools import chain
 from collections import defaultdict
 from abc import ABC, abstractmethod
@@ -376,15 +377,40 @@ class SnapshotStream(BaseModel):
         self._consumers.add(consumer)
 
     def publish(self):
-        for chunk in self.bytes_stream:
-            for consumer in self._consumers:
-                consumer.send(chunk)
-        # send None to have the consumer do any clean up operations
-        for consumer in self._consumers:
+        num_consumers = len(self._consumers)
+        if num_consumers == 0:
+            return
+        read_barrier = threading.Barrier(num_consumers + 1)
+        write_barrier = threading.Barrier(num_consumers + 1)
+        shared = {'chunk': None}
+
+        def consumer_worker(consumer):
             try:
-                consumer.send(None)
+                write_barrier.wait()  # allow the first iteration
+                while True:
+                    read_barrier.wait()
+                    chunk = shared['chunk']
+                    consumer.send(chunk)
+                    write_barrier.wait()
             except StopIteration:
-                pass
+                return
+
+        consumer_threads = []
+        for consumer in self._consumers:
+            t = threading.Thread(target=consumer_worker, args=(consumer,))
+            t.start()
+            consumer_threads.append(t)
+
+        for chunk in self.bytes_stream:
+            write_barrier.wait()
+            shared['chunk'] = chunk
+            read_barrier.wait()
+
+        write_barrier.wait()
+        shared['chunk'] = None
+        read_barrier.wait()
+        for t in consumer_threads:
+            t.join()
 
 
 class SnapshotStorageAdapter(ABC):
