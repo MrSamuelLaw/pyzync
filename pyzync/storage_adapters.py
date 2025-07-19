@@ -571,23 +571,25 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
         directory = base_path.parent
         stem = base_path.stem
         suffix = base_path.suffix
-        # Find all chunked files: base, _1, _2, ...
-        pattern = re.compile(rf"{re.escape(stem)}_\d+{re.escape(suffix)}")
 
         # List all files in the directory on Dropbox
         def list_files(folder):
             try:
-                res = dbx.files_list_folder(folder)
+                res = dbx.files_list_folder(str(folder))
             except dropbox.exceptions.ApiError:
                 return []
             entries = res.entries
             while res.has_more:
                 res = dbx.files_list_folder_continue(res.cursor)
                 entries.extend(res.entries)
-            return [e for e in entries if isinstance(e, dropbox.files.FileMetadata)]
+            return [
+                PurePath(e.path_display) for e in entries if isinstance(e, dropbox.files.FileMetadata)
+            ]
 
-        files = list_files(str(directory))
-        filepaths = [PurePath(f.name) for f in files if pattern.fullmatch(PurePath(f.name).name)]
+        # Find all chunked files: base, _1, _2, ...
+        pattern = re.compile(rf"{re.escape(stem)}_\d+{re.escape(suffix)}")
+        filepaths = list_files(directory)
+        filepaths = [f for f in filepaths if pattern.fullmatch(f.name)]
         filepaths = sorted(filepaths, key=lambda f: int(f.stem.split('_')[-1]))
         filepaths.insert(0, base_path)
         for f in filepaths:
