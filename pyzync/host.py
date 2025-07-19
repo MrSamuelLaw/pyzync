@@ -1,10 +1,11 @@
 import sys
+import asyncio
 import subprocess
 import logging
 from functools import partial
 from textwrap import dedent
 from itertools import groupby
-from typing import Optional, Iterable
+from typing import Optional, Iterable, AsyncIterator
 
 from pydantic import validate_call
 
@@ -227,6 +228,109 @@ class HostSnapshotManager:
         stream = SnapshotStream(
             node=node,
             bytes_stream=iterator,
+        )
+        return stream
+
+    @staticmethod
+    @validate_call
+    async def send_async(
+            dt: Datetime,
+            graph: SnapshotGraph,
+            parent_dt: Optional[Datetime] = None,
+            zfs_args: list[str] = [],
+            blocksize: int = 2**20,  # 1 MB
+            dryrun: bool = False):
+        """
+        Async version: Send a snapshot or incremental snapshot as a stream.
+
+        Args:
+            dt (Datetime): The datetime of the snapshot to send.
+            graph (SnapshotGraph): The snapshot graph.
+            parent_dt (Optional[Datetime], optional): The parent snapshot datetime for incremental. Defaults to None.
+            zfs_args (list[str], optional): Additional ZFS arguments. Defaults to [].
+            blocksize (int, optional): Block size for streaming. Defaults to 1MB.
+            dryrun (bool, optional): If True, do not perform actual operations. Defaults to False.
+
+        Returns:
+            SnapshotStream: The snapshot stream object.
+
+        Raises:
+            DataIntegrityError: If parent_dt is not less than dt.
+            ValueError: If the graph does not contain the required nodes.
+            subprocess.CalledProcessError: If the ZFS send command fails.
+            Exception: For other errors during send.
+        """
+        if (parent_dt is not None) and (parent_dt >= dt):
+            raise DataIntegrityError(
+                dedent("""
+                    Cannot create incremental snapshots that link a newer snapshot to an older snapshot
+                    Incremental snapshots most link an older snapshot to a newer snapshot
+                """))
+
+        # check that the nodes exist in the graph
+        nodes = graph.get_nodes()
+        node = [n for n in nodes if n.dt == dt and n.parent_dt is None]
+        if not node:
+            raise ValueError(f'Graph does not contain complete node with dt = {dt}')
+        node = node[0]
+        if parent_dt is not None:
+            if not any((n for n in nodes if n.dt == parent_dt and n.parent_dt is None)):
+                raise ValueError(f'Graph does not contain complete node with dt = {parent_dt}')
+            # update the node definition if the parent exists
+            node = SnapshotNode(dt=node.dt, parent_dt=parent_dt, dataset_id=node.dataset_id)
+
+        async def _async_iterator():
+            try:
+                # build the command
+                cmd = ["zfs", "send", *zfs_args]
+                if node.parent_dt is not None:
+                    # note we only pass the part after the @ to avoid mixing datasets by accident
+                    cmd.extend(["-i", str(node.parent_dt)])
+                cmd.append(node.snapshot_id)
+
+                # using asyncio to create subprocess
+                process = await asyncio.create_subprocess_exec(*cmd,
+                                                               stdout=asyncio.subprocess.PIPE,
+                                                               stderr=asyncio.subprocess.PIPE,
+                                                               limit=blocksize)
+
+                # check to make sure the pipe is open
+                if process.stdout is None:
+                    raise RuntimeError("Failed to open stdout for the subprocess")
+
+                # iterate over the binary data asynchronously
+                while True:
+                    chunk = await process.stdout.read(blocksize)
+                    if not chunk:
+                        break
+                    yield chunk
+
+                # wait for the process to complete
+                returncode = await process.wait()
+                if returncode != 0:
+                    error = await process.stderr.read() if process.stderr else b""
+                    raise subprocess.CalledProcessError(returncode, cmd, stderr=error)
+
+            except subprocess.CalledProcessError as e:
+                logger.exception(f"Failed to send snapshot using cmd = {cmd}")
+                print(e.stderr, file=sys.stderr)
+                raise
+            except Exception as e:
+                logger.exception(f"Unexpected error during async snapshot send: {e}")
+                raise
+
+        if dryrun:
+
+            async def dry_run_iterator():
+                yield b'somebytes'
+
+            iterator = dry_run_iterator()
+        else:
+            iterator = _async_iterator()
+
+        stream = SnapshotStream(
+            node=node,
+            bytes_stream=aiter(iterator)  # Convert async iterator to bytes stream
         )
         return stream
 
