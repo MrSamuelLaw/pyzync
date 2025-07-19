@@ -384,7 +384,7 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
                         handle.write(left)
                         handle.close()
                         file_index += 1
-                        cur_path = path.with_name(f"{path.stem}_{file_index}{cur_path.suffix}")
+                        cur_path = path.with_name(f"{path.stem}_{file_index}{path.suffix}")
                         handle = open(cur_path, 'wb')
                         file_size = len(right)
                         handle.write(right)
@@ -713,10 +713,11 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
                         left, right = buffer[0:split_index], buffer[split_index:]
                         dbx.files_upload_session_finish(
                             left, dropbox.files.UploadSessionCursor(session_id, file_size),
-                            dropbox.files.CommitInfo(str(path), mode=dropbox.files.WriteMode.overwrite))
+                            dropbox.files.CommitInfo(str(cur_path),
+                                                     mode=dropbox.files.WriteMode.overwrite))
                         buffer = right
                         file_index += 1
-                        cur_path = path.with_name(f"{path.stem}_{file_index}{cur_path.suffix}")
+                        cur_path = path.with_name(f"{path.stem}_{file_index}{path.suffix}")
                         result = dbx.files_upload_session_start(b'')
                         session_id = result.session_id
                         file_size = 0
@@ -731,7 +732,7 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
                 if buffer and session_id:
                     dbx.files_upload_session_finish(
                         buffer, dropbox.files.UploadSessionCursor(session_id, file_size),
-                        dropbox.files.CommitInfo(str(path), mode=dropbox.files.WriteMode.overwrite))
+                        dropbox.files.CommitInfo(str(cur_path), mode=dropbox.files.WriteMode.overwrite))
             except:
                 logger.exception('Failed to consume bytes for dropbox remote')
 
