@@ -373,7 +373,7 @@ class TestDropboxLoopCheck(unittest.TestCase):
         path.unlink()
 
     def test_can_backup_and_restore_using_chunked_files(self):
-        """Test that ensures that data is able to be sent to a local file
+        """Test that ensures that data is able to be sent to a dropbox file
         and used to recover lost data.
         """
         dataset_id = 'tank0/foo'
