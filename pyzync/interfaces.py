@@ -394,6 +394,14 @@ class SnapshotStream(BaseModel):
         write_barrier = threading.Barrier(num_consumers + 1)
         shared = {'chunk': None}
 
+        def format_speed(bytes_per_second: float) -> str:
+            if bytes_per_second >= 1024 * 1024 * 1024:  # GB/s
+                return f"{bytes_per_second / (1024 * 1024 * 1024):.2f} GB/s"
+            elif bytes_per_second >= 1024 * 1024:  # MB/s
+                return f"{bytes_per_second / (1024 * 1024):.2f} MB/s"
+            else:  # KB/s
+                return f"{bytes_per_second / 1024:.2f} KB/s"
+
         def consumer_worker(consumer):
             try:
                 logger.debug(f"Consumer thread {threading.current_thread().name} started.")
@@ -401,10 +409,16 @@ class SnapshotStream(BaseModel):
                 while True:
                     read_barrier.wait()
                     chunk = shared['chunk']
-                    logger.debug(
-                        f"Consumer {threading.current_thread().name} received chunk: {type(chunk)}, size: {len(chunk) if chunk else 0}"
-                    )
+                    cycle_start = time.time()
                     consumer.send(chunk)
+                    cycle_end = time.time()
+                    cycle_sec = cycle_end - cycle_start
+                    chunk_length = len(chunk) if chunk is not None else 0
+                    bytes_per_second = chunk_length / cycle_sec
+                    bytes_per_second = format_speed(bytes_per_second)
+                    logger.debug(
+                        f"[{threading.current_thread().name}] Last chunk consumed at a rate of {bytes_per_second}"
+                    )
                     write_barrier.wait()
             except StopIteration:
                 logger.debug(f"Consumer {threading.current_thread().name} finished (StopIteration).")
@@ -416,14 +430,6 @@ class SnapshotStream(BaseModel):
             t.start()
             consumer_threads.append(t)
             logger.debug(f"Started consumer thread {t.name}")
-
-        def format_speed(bytes_per_second: float) -> str:
-            if bytes_per_second >= 1024 * 1024 * 1024:  # GB/s
-                return f"{bytes_per_second / (1024 * 1024 * 1024):.2f} GB/s"
-            elif bytes_per_second >= 1024 * 1024:  # MB/s
-                return f"{bytes_per_second / (1024 * 1024):.2f} MB/s"
-            else:  # KB/s
-                return f"{bytes_per_second / 1024:.2f} KB/s"
 
         total_bytes = 0
         publish_start = time.time()
