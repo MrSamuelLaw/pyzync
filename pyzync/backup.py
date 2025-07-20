@@ -22,6 +22,7 @@ class BackupJob(BaseModel):
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
     retention_policy: RetentionPolicy
+    buffer_length: int = 100 * (2**20)  # 100 MB is the default buffer length
     adapters: list[SnapshotStorageAdapter]
 
     def rotate(self,
@@ -90,7 +91,7 @@ class BackupJob(BaseModel):
             remotes.append((manager, remote_graph))
 
         # send the streams to the remote if they are not already on the remote
-        streams = [HostSnapshotManager.send(chain[0].dt, host_graph)]
+        streams = [HostSnapshotManager.send(chain[0].dt, host_graph, buffer_length=self.buffer_length)]
         streams.extend([
             HostSnapshotManager.send(node.dt, host_graph, parent.dt)
             for node, parent in zip(chain[1:], chain)

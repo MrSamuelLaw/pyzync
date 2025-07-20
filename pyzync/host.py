@@ -148,7 +148,7 @@ class HostSnapshotManager:
             graph: SnapshotGraph,
             parent_dt: Optional[Datetime] = None,
             zfs_args: list[str] = [],
-            blocksize: int = 2**20,  # 1 MB
+            buffer_length: int = 100 * (2**20),  # 100 MB
             dryrun: bool = False):
         """
         Send a snapshot or incremental snapshot as a stream.
@@ -158,7 +158,7 @@ class HostSnapshotManager:
             graph (SnapshotGraph): The snapshot graph.
             parent_dt (Optional[Datetime], optional): The parent snapshot datetime for incremental. Defaults to None.
             zfs_args (list[str], optional): Additional ZFS arguments. Defaults to [].
-            blocksize (int, optional): Block size for streaming. Defaults to 4096.
+            buffer_size (int, optional): Block size for streaming. Defaults to 100 MB.
             dryrun (bool, optional): If True, do not perform actual operations. Defaults to False.
 
         Returns:
@@ -202,13 +202,13 @@ class HostSnapshotManager:
                 with subprocess.Popen(cmd,
                                       stdout=subprocess.PIPE,
                                       stderr=subprocess.PIPE,
-                                      bufsize=blocksize) as process:
+                                      bufsize=buffer_length) as process:
                     # check to make sure the pipe is open
                     if process.stdout is None:
                         raise RuntimeError("Failed to open stdout for the subprocess")
 
                     # iterate over the binary data
-                    for block in iter(partial(process.stdout.read, blocksize), b""):
+                    for block in iter(partial(process.stdout.read, buffer_length), b""):
                         yield block
 
                     # check for non-zero return code
