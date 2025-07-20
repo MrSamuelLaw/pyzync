@@ -6,6 +6,7 @@ for different storage backends. Currently supports local filesystem storage.
 
 import os
 import re
+import time
 import dropbox
 import logging
 from pathlib import Path, PurePath
@@ -44,6 +45,10 @@ class RemoteSnapshotManager(BaseModel):
         Returns:
             list[SnapshotGraph]: List of snapshot graphs for each dataset.
         """
+        logger.info(
+            "[RemoteStorageAdapter] query called for " \
+            f"adapter={self.adapter} with dataset_id={dataset_id}"
+        )
         files = self.adapter.query(dataset_id)
         nodes = [SnapshotNode.from_zfs_filepath(f) for f in files]
         graphs: list[SnapshotGraph] = []
@@ -51,6 +56,8 @@ class RemoteSnapshotManager(BaseModel):
             graph = SnapshotGraph(dataset_id=dataset_id)
             [graph.add(node) for node in group]
             graphs.append(graph)
+        logger.info(f"[RemoteStorageAdapter] query for adapter={self.adapter} " \
+                    f"with dataset_id={dataset_id} returned {len(graphs)} graphs")
         return graphs
 
     def destroy(self,
@@ -77,7 +84,7 @@ class RemoteSnapshotManager(BaseModel):
             - Can optionally prune orphaned nodes after deletion
             - Prevents accidental chain breakage unless forced
         """
-        logger.info(f'Destroying node = {node}')
+        logger.info(f"[RemoteStorageAdapter] destroy called for adapter={self.adapter} with node={node}")
         # if there is only one chain, prevent the user from deleting anything but the last link
         chains = graph.get_chains()
         if (len(chains) == 1) and (node != chains[0][-1]) and (not force):
@@ -86,15 +93,19 @@ class RemoteSnapshotManager(BaseModel):
         # remove the node
         graph.remove(node)
         if not dryrun:
+            logger.debug(f'Destroying node = {node}')
             self.adapter.destroy(node)
         # prune if needed
         if prune:
             orphans = graph.get_orphans()
             for node in orphans:
-                logger.info(f'Destroying node = {node}')
                 graph.remove(node)
                 if not dryrun:
+                    logger.debug(f'Destroying node = {node}')
                     self.adapter.destroy(node)
+        logger.info(
+            f"[RemoteStorageAdapter] Successfully destroyed called for adapter={self.adapter} with node={node}"
+        )
 
     def send(self,
              node: SnapshotNode,
@@ -120,12 +131,16 @@ class RemoteSnapshotManager(BaseModel):
             - Returns dummy stream in dryrun mode
             - Uses adapter's send method for actual data transfer
         """
+        logger.info(f"[RemoteStorageAdapter] Send called for adapter={self.adapter} with node={node}")
         if node not in graph.get_nodes():
             raise ValueError(f'Node = {node} not part of graph = {graph}')
         if dryrun:
             stream = SnapshotStream(node=node, bytes_stream=(b'bytes_stream',))
         else:
             stream = SnapshotStream(node=node, bytes_stream=self.adapter.send(node, blocksize=blocksize))
+        logger.info(
+            f"[RemoteStorageAdapter] Stream successfully built for adapter={self.adapter} with node={node}"
+        )
         return stream
 
     def recv(self,
@@ -151,7 +166,8 @@ class RemoteSnapshotManager(BaseModel):
             - Supports different duplicate handling policies
             - Log messages track operation progress
         """
-        logger.info(f'Receiving stream for node = {stream.node}')
+        logger.info(
+            f"[RemoteStorageAdapter] Recieving stream for adapter={self.adapter} and node={stream.node}")
         is_duplicate = stream.node in graph.get_nodes()
         if not is_duplicate:
             graph.add(stream.node)
@@ -159,7 +175,10 @@ class RemoteSnapshotManager(BaseModel):
             raise ValueError(
                 f'Cannot recv stream = {stream} duplicate node = {stream.node} for adapter = {self.adapter}'
             )
-        self.adapter.recv(stream)
+        if not dryrun:
+            self.adapter.recv(stream)
+        logger.info(
+            f"[RemoteStorageAdapter] Recieved stream for adapter={self.adapter} and node={stream.node}")
 
     def subscribe(self,
                   stream: SnapshotStream,
@@ -187,7 +206,9 @@ class RemoteSnapshotManager(BaseModel):
             - Uses adapter's subscribe method for data handling
             - Suitable for real-time or streaming data reception
         """
-        logger.info(f'Subscribing to stream for node = {stream.node}')
+        logger.info(
+            f"[RemoteStorageAdapter] subscribing to stream for adapter={self.adapter} and node={stream.node}"
+        )
         is_duplicate = stream.node in graph.get_nodes()
         if not is_duplicate:
             graph.add(stream.node)
@@ -195,7 +216,11 @@ class RemoteSnapshotManager(BaseModel):
             raise ValueError(
                 f'Cannot subscribe to stream = {stream} duplicate node = {stream.node} for adapter = {self.adapter}'
             )
-        self.adapter.subscribe(stream)
+        if not dryrun:
+            self.adapter.subscribe(stream)
+        logger.info(
+            f"[RemoteStorageAdapter] Successfully subscribed to stream for adapter={self.adapter} and node={stream.node}"
+        )
 
 
 class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
@@ -224,6 +249,9 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
             raise ValueError(f"directory must be absolute, instead received path = {directory}")
         return directory.resolve()
 
+    def __str__(self):
+        return f"LocalFileStorageAdapter(directory={self.directory}, max_file_size={self.max_file_size})"
+
     def query(self, dataset_id: Optional[ZfsDatasetId] = None):
         """
         Query all .zfs files in the directory for a given dataset or all datasets.
@@ -234,6 +262,7 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
         Returns:
             list[ZfsFilePath]: List of matching ZFS file paths.
         """
+        logger.debug(f"[LocalFileStorageAdapter] query called with dataset_id={dataset_id}")
         # query all the .zfs files at the root and below
         logger.debug(f"Querying snapshot files in {self.directory} for {dataset_id}")
         glob_pattern = "*.zfs" if dataset_id is None else f"**/{dataset_id}/*.zfs"
@@ -259,6 +288,7 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
         Args:
             node (SnapshotNode): The node to destroy.
         """
+        logger.info(f"[LocalFileStorageAdapter] destroy called for node={node}")
         filepath = node.filepath
         base_path = self.directory.joinpath(filepath)
         base_path = base_path.resolve()
@@ -278,6 +308,7 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
                 fp.unlink()
             except FileNotFoundError as e:
                 logger.warning(f"File not found during destroy: {fp}")
+        logger.info(f"[LocalFileStorageAdapter] destroy called for node={node}")
 
     def recv(self, stream: SnapshotStream):
         """
@@ -290,6 +321,7 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
             FileNotFoundError: If the parent directory cannot be created or file cannot be written.
             OSError: If there is an OS error during file operations.
         """
+        logger.debug(f"[LocalFileStorageAdapter] recv called for stream.node={stream.node}")
         path = self.directory.joinpath(stream.node.filepath)
         logger.info(f"Receiving snapshot stream to {path}")
         # create the parent dirs if they don't exist
@@ -339,11 +371,12 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
             file_index += 1
             next_path = path.with_name(f"{path.stem}_{file_index}{path.suffix}")
             remaining_bytes = write_bytes(next_path, stream.bytes_stream, remaining_bytes)
+        logger.info(f"[LocalFileStorageAdapter] recv and wrote bytes for stream.node={stream.node}")
 
     def subscribe(self, stream: SnapshotStream):
+        logger.debug(f"[LocalFileStorageAdapter] subscribe called for stream.node={stream.node}")
         # build a function that can handle a single chunck
         path = self.directory.joinpath(stream.node.filepath)
-        logger.debug(f"Subscribing for stream = {stream} to path = {path}")
         # create the parent dirs if they don't exist
         if not path.parent.exists():
             logger.debug(f"Creating parent directories {path}")
@@ -367,6 +400,16 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
             file_index = 0
             cur_path = path
             handle = None
+
+            def _logged_write(handle, bytes):
+                start = time.time
+                nbytes = len(bytes)
+                handle.write(bytes)
+                end = time.time
+                logger.debug(
+                    f"[LocalFileStorageAdapter] wrote {nbytes} bytes to {cur_path} using adapter {self}."
+                )
+
             try:
                 while True:
                     chunk = yield
@@ -381,15 +424,15 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
                                                              > self.max_file_size):
                         split_index = self.max_file_size - file_size
                         left, right = chunk[0:split_index], chunk[split_index:]
-                        handle.write(left)
+                        _logged_write(handle, left)
                         handle.close()
                         file_index += 1
                         cur_path = path.with_name(f"{path.stem}_{file_index}{path.suffix}")
                         handle = open(cur_path, 'wb')
                         file_size = len(right)
-                        handle.write(right)
+                        _logged_write(handle, right)
                     file_size += len(chunk)
-                    handle.write(chunk)
+                    _logged_write(handle, chunk)
             except IOError as e:
                 logger.exception(f"Error writing to {cur_path}: {e}")
             finally:
@@ -415,6 +458,7 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
             FileNotFoundError: If the file does not exist.
             OSError: If there is an OS error during file operations.
         """
+        logger.debug(f"[LocalFileStorageAdapter] send called for node={node}, blocksize={blocksize}")
         filepath = node.filepath
         base_path = self.directory.joinpath(filepath)
         base_path = base_path.resolve()
@@ -449,6 +493,7 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
                         if not chunk:
                             break
                         yield chunk
+            logger.info(f"Successfully sent snapshot file(s) for {base_path}")
 
         return _snapshot_stream()
 
@@ -466,6 +511,9 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
     refresh_token: Optional[str] = None
     access_token: Optional[str] = None
     max_file_size: int = 350 * (2**30)  # 350 GB
+
+    def __str__(self):
+        return f"DropboxStorageAdapter(directory={self.directory}, max_file_size={self.max_file_size}, key={'***' if self.key else None}, secret={'***' if self.secret else None})"
 
     @field_validator('directory')
     @classmethod
@@ -518,6 +566,7 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
         """
         Query all .zfs files in Dropbox for a given dataset or all datasets.
         """
+        logger.debug(f"[DropboxStorageAdapter] query called with dataset_id={dataset_id}")
         dbx = self._client()
         # Build the path to list
         if dataset_id is None:
@@ -566,6 +615,7 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
         """
         Delete a snapshot file and all chunked files from Dropbox.
         """
+        logger.debug(f"[DropboxStorageAdapter] destroy called for node={node}")
         dbx = self._client()
         base_path = self.directory.joinpath(node.filepath)
         directory = base_path.parent
@@ -597,6 +647,7 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
                 dbx.files_delete_v2(str(f))
             except dropbox.exceptions.ApiError as e:
                 logger.warning(f"Dropbox file could not be destroyed: {f}")
+        logger.info(f"Successfully destroyed all files for {base_path}")
 
     def recv(self, stream: SnapshotStream):
         """
@@ -605,8 +656,7 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
         """
         dbx = self._client()
         path = self.directory.joinpath(stream.node.filepath)
-        logger.info(f"Receiving snapshot stream to Dropbox at {path}")
-
+        logger.debug(f"[DropboxStorageAdapter] recv called for stream.node={stream.node}")
         # calls to dbx.files_upload_session_append_v2 must be a multiple of this many bytes
         # except for the last call with UploadSessionStartArg.close to True.
         WINDOW_LENGTH = 4 * (2**20)  # 4MB
@@ -664,6 +714,7 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
             file_index += 1
             next_path = path.with_name(f"{path.stem}_{file_index}{path.suffix}")
             remaining_bytes = write_bytes(next_path, stream.bytes_stream, remaining_bytes)
+        logger.info(f"Successfully received and wrote snapshot stream to Dropbox at {path}")
 
     def subscribe(self, stream: SnapshotStream):
         """Subscribe to a snapshot stream and handle incoming chunks for Dropbox upload.
@@ -672,7 +723,7 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
             stream (SnapshotStream): The snapshot stream to subscribe to.
         """
         path = self.directory.joinpath(stream.node.filepath)
-        logger.debug(f"Subscribing for stream = {stream} to path = {path}")
+        logger.debug(f"[DropboxStorageAdapter] subscribe called for stream.node={stream.node}")
 
         WINDOW_LENGTH = 4 * (2**20)  # 4MB
 
@@ -744,6 +795,7 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
         """
         Download a snapshot file and all chunked files from Dropbox as a stream.
         """
+        logger.debug(f"[DropboxStorageAdapter] send called for node={node}, blocksize={blocksize}")
         dbx = self._client()
         base_path = self.directory.joinpath(node.filepath)
         directory = base_path.parent
@@ -795,5 +847,6 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
                     if not chunk:
                         break
                     yield chunk
+            logger.info(f"Successfully sent snapshot file(s) for {base_path}")
 
         return _snapshot_stream()

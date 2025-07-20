@@ -1,4 +1,6 @@
 import re
+import time
+import logging
 import threading
 from itertools import chain
 from collections import defaultdict
@@ -9,6 +11,8 @@ from typing import (Self, Iterable, Generator, Optional, Literal, overload, Any,
 from pydantic import (BaseModel, model_validator, computed_field, ConfigDict, GetCoreSchemaHandler,
                       validate_call)
 from pydantic_core import CoreSchema, core_schema
+
+logger = logging.getLogger(__name__)
 
 DATETIME_FORMAT = r"%Y%m%dT%H%M%S"
 DATETIME_REGEX = r'\d{8}T\d{6}'
@@ -279,6 +283,10 @@ class SnapshotGraph(BaseModel):
     dataset_id: ZfsDatasetId
     _table: defaultdict[Datetime, set[SnapshotNode]] = defaultdict(set)
 
+    def __str__(self):
+        nodes = list(self.get_nodes())
+        return f"SnapshotGraph(dataset_id={self.dataset_id}, nodes={nodes})"
+
     def get_nodes(self):
         """
         Return all nodes in the graph.
@@ -378,7 +386,9 @@ class SnapshotStream(BaseModel):
 
     def publish(self):
         num_consumers = len(self._consumers)
+        logger.debug(f"Publishing to {num_consumers} consumers for node {self.node}")
         if num_consumers == 0:
+            logger.debug("No consumers registered, exiting publish.")
             return
         read_barrier = threading.Barrier(num_consumers + 1)
         write_barrier = threading.Barrier(num_consumers + 1)
@@ -386,31 +396,67 @@ class SnapshotStream(BaseModel):
 
         def consumer_worker(consumer):
             try:
+                logger.debug(f"Consumer thread {threading.current_thread().name} started.")
                 write_barrier.wait()  # allow the first iteration
                 while True:
                     read_barrier.wait()
                     chunk = shared['chunk']
+                    logger.debug(
+                        f"Consumer {threading.current_thread().name} received chunk: {type(chunk)}, size: {len(chunk) if chunk else 0}"
+                    )
                     consumer.send(chunk)
                     write_barrier.wait()
             except StopIteration:
+                logger.debug(f"Consumer {threading.current_thread().name} finished (StopIteration).")
                 return
 
         consumer_threads = []
         for consumer in self._consumers:
-            t = threading.Thread(target=consumer_worker, args=(consumer,))
+            t = threading.Thread(target=consumer_worker, args=(consumer,), daemon=True)
             t.start()
             consumer_threads.append(t)
+            logger.debug(f"Started consumer thread {t.name}")
 
+        def format_speed(bytes_per_second: float) -> str:
+            if bytes_per_second >= 1024 * 1024 * 1024:  # GB/s
+                return f"{bytes_per_second / (1024 * 1024 * 1024):.2f} GB/s"
+            elif bytes_per_second >= 1024 * 1024:  # MB/s
+                return f"{bytes_per_second / (1024 * 1024):.2f} MB/s"
+            else:  # KB/s
+                return f"{bytes_per_second / 1024:.2f} KB/s"
+
+        total_bytes = 0
+        publish_start = time.time()
+        cycle_start = time.time()
         for chunk in self.bytes_stream:
+            # log out the bytes per second
+            cycle_end = time.time()
+            cycle_sec = cycle_end - cycle_start
+            chunk_length = len(chunk)
+            total_bytes += chunk_length
+            bytes_per_second = chunk_length / cycle_sec
+            bytes_per_second = format_speed(bytes_per_second)
+            logger.debug(f"Last chunk read at a rate of {bytes_per_second}")
+            # sync using barrier
             write_barrier.wait()
             shared['chunk'] = chunk
+            # sync again using other barrier
             read_barrier.wait()
+            cycle_start = time.time()
+        # write out average publish speed
+        publish_end = time.time()
+        publish_sec = publish_end - publish_start
+        bytes_per_second = total_bytes / publish_sec
+        bytes_per_second = format_speed(bytes_per_second)
+        logger.info(f"Publish completed with an average transfer rate of {bytes_per_second}")
 
         write_barrier.wait()
         shared['chunk'] = None
+        logger.debug("Main thread published final chunk (None)")
         read_barrier.wait()
         for t in consumer_threads:
             t.join()
+            logger.debug(f"Consumer thread {t.name} joined.")
 
 
 class SnapshotStorageAdapter(ABC):
