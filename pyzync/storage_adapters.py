@@ -725,7 +725,8 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
         path = self.directory.joinpath(stream.node.filepath)
         logger.debug(f"[DropboxStorageAdapter] subscribe called for stream.node={stream.node}")
 
-        WINDOW_LENGTH = 4 * (2**20)  # 4MB
+        MODULO = 4 * (2**20)  # 4MB
+        MAX_SIZE = 144 * (2**20)  # 144 MB
 
         def consume_bytes(path: PurePath):
             """Consumes bytes from a stream and uploads them to Dropbox, splitting into chunks if needed.
@@ -773,9 +774,10 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
                         session_id = result.session_id
                         file_size = 0
                     else:
-                        while len(buffer) >= WINDOW_LENGTH:
-                            # grab a chunk of the buffer
-                            data, buffer = buffer[:WINDOW_LENGTH], buffer[WINDOW_LENGTH:]
+                        while len(buffer) >= MODULO:
+                            # Calculate largest slice that's divisible by MODULO and less than MAX_SIZE
+                            slice_size = min(len(buffer) - (len(buffer) % MODULO), MAX_SIZE)
+                            data, buffer = buffer[:slice_size], buffer[slice_size:]
                             # perform the upload
                             dbx.files_upload_session_append_v2(
                                 data, dropbox.files.UploadSessionCursor(session_id, file_size))
