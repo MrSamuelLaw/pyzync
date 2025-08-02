@@ -14,7 +14,7 @@ from pathlib import Path, PurePath
 from typing import Optional, Iterable
 from itertools import groupby
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator, SecretStr
 
 from pyzync.errors import DataIntegrityError
 from pyzync.interfaces import (SnapshotStream, DuplicateDetectedPolicy, ZfsDatasetId, ZfsFilePath,
@@ -443,14 +443,11 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
     model_config = ConfigDict(frozen=True)
 
     directory: PurePath
-    key: Optional[str] = None
-    secret: Optional[str] = None
-    refresh_token: Optional[str] = None
-    access_token: Optional[str] = None
+    key: Optional[SecretStr] = None
+    secret: Optional[SecretStr] = None
+    refresh_token: Optional[SecretStr] = None
+    access_token: Optional[SecretStr] = None
     max_file_size: int = 350 * (2**30)  # 350 GB
-
-    def __str__(self):
-        return f"DropboxStorageAdapter(directory={self.directory}, max_file_size={self.max_file_size}, key={'***' if self.key else None}, secret={'***' if self.secret else None})"
 
     @field_validator('directory')
     @classmethod

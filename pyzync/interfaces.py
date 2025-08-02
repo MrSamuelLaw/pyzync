@@ -382,6 +382,8 @@ class SnapshotStream(BaseModel):
         return f"SnapshotStream(node={self.node.snapshot_id}, filepath={self.node.filepath})"
 
     def register(self, consumer: BytesConsumer):
+        if consumer in self._consumers:
+            raise ValueError('Cannot add duplicate consumers')
         self._consumers.add(consumer)
 
     def publish(self):
@@ -402,23 +404,37 @@ class SnapshotStream(BaseModel):
             else:  # KB/s
                 return f"{bytes_per_second / 1024:.2f} KB/s"
 
+        def compute_speed(cycle_start, cycle_end, chunk_length):
+            cycle_sec = cycle_end - cycle_start
+            chunk_length = chunk_length if chunk_length is not None else 0
+            bytes_per_second = chunk_length / cycle_sec
+            bytes_per_second = format_speed(bytes_per_second)
+            return bytes_per_second
+
         def consumer_worker(consumer):
+            """Function that pushes data to a consumer generator asyncrounously. 
+            """
             try:
                 logger.debug(f"Consumer thread {threading.current_thread().name} started.")
                 write_barrier.wait()  # allow the first iteration
+                faulted = False
                 while True:
                     read_barrier.wait()
                     chunk = shared['chunk']
-                    cycle_start = time.time()
-                    consumer.send(chunk)
-                    cycle_end = time.time()
-                    cycle_sec = cycle_end - cycle_start
-                    chunk_length = len(chunk) if chunk is not None else 0
-                    bytes_per_second = chunk_length / cycle_sec
-                    bytes_per_second = format_speed(bytes_per_second)
-                    logger.debug(
-                        f"[{threading.current_thread().name}] Last chunk consumed at a rate of {bytes_per_second}"
-                    )
+                    try:
+                        if not faulted:
+                            cycle_start = time.time()
+                            consumer.send(chunk)
+                            cycle_end = time.time()
+                            bytes_per_second = compute_speed(cycle_start, cycle_end, len(chunk))
+                            logger.debug(
+                                f"[{threading.current_thread().name}] Last chunk consumed at a rate of {bytes_per_second}"
+                            )
+                    except Exception:
+                        faulted = True
+                        logger.exception(
+                            f"Consumer thread {threading.current_thread().name} faulted...will discard future bytes"
+                        )
                     write_barrier.wait()
             except StopIteration:
                 logger.debug(f"Consumer {threading.current_thread().name} finished (StopIteration).")
@@ -437,12 +453,11 @@ class SnapshotStream(BaseModel):
         for chunk in self.bytes_stream:
             # log out the bytes per second
             cycle_end = time.time()
-            cycle_sec = cycle_end - cycle_start
             chunk_length = len(chunk)
-            total_bytes += chunk_length
-            bytes_per_second = chunk_length / cycle_sec
-            bytes_per_second = format_speed(bytes_per_second)
+            bytes_per_second = compute_speed(cycle_start, cycle_end, chunk_length)
             logger.debug(f"Last chunk read at a rate of {bytes_per_second}")
+            # log total bytes for output message
+            total_bytes += chunk_length
             # sync using barrier
             write_barrier.wait()
             shared['chunk'] = chunk
@@ -451,9 +466,7 @@ class SnapshotStream(BaseModel):
             cycle_start = time.time()
         # write out average publish speed
         publish_end = time.time()
-        publish_sec = publish_end - publish_start
-        bytes_per_second = total_bytes / publish_sec
-        bytes_per_second = format_speed(bytes_per_second)
+        bytes_per_second = compute_speed(publish_start, publish_end, total_bytes)
         logger.info(f"Publish completed with an average transfer rate of {bytes_per_second}")
 
         write_barrier.wait()
