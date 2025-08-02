@@ -2,8 +2,8 @@ import unittest
 from typing import Optional
 
 from pyzync.errors import DataIntegrityError
-from pyzync.interfaces import SnapshotStorageAdapter, ZfsDatasetId, SnapshotStream, SnapshotGraph, SnapshotNode
-from pyzync.storage_adapters import RemoteSnapshotManager
+from pyzync.interfaces import ZfsDatasetId, SnapshotStream, SnapshotGraph, SnapshotNode
+from pyzync.storage_adapters import SnapshotStorageAdapter, RemoteSnapshotManager
 
 
 class FakeStorageAdapter(SnapshotStorageAdapter):
@@ -23,9 +23,6 @@ class FakeStorageAdapter(SnapshotStorageAdapter):
 
     def send(self, *args, **kwargs):
         return [b'fake_bytes']
-
-    def recv(self, *args, **kwargs):
-        pass
 
     def subscribe(self, stream):
         pass
@@ -100,7 +97,8 @@ class TestFileSnapshotManager(unittest.TestCase):
         manager = RemoteSnapshotManager(adapter=FakeStorageAdapter())
         new_node = SnapshotNode(dataset_id='tank0/foo', dt='20250505T120001')
         stream = SnapshotStream(node=new_node, bytes_stream=(b'some_bytes',))
-        manager.recv(stream, graph)
+        manager.subscribe(stream, graph)
+        stream.publish()
         manager.destroy(nodes[0], graph, prune=True)
         chains = graph.get_chains()
         # only one chain should exist

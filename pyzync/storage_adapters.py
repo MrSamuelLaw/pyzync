@@ -9,6 +9,7 @@ import re
 import time
 import dropbox
 import logging
+from abc import ABC, abstractmethod
 from pathlib import Path, PurePath
 from typing import Optional, Iterable
 from itertools import groupby
@@ -16,14 +17,44 @@ from itertools import groupby
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from pyzync.errors import DataIntegrityError
-from pyzync.interfaces import (SnapshotStorageAdapter, SnapshotStream, DuplicateDetectedPolicy,
-                               ZfsDatasetId, ZfsFilePath, SnapshotNode, SnapshotGraph)
+from pyzync.interfaces import (SnapshotStream, DuplicateDetectedPolicy, ZfsDatasetId, ZfsFilePath,
+                               SnapshotNode, SnapshotGraph)
 
 logger = logging.getLogger(__name__)
 
-# Configure Dropbox SDK logging to only show warnings and above
-dropbox_logger = logging.getLogger('dropbox')
-dropbox_logger.setLevel(logging.WARNING)
+
+class SnapshotStorageAdapter(ABC):
+    """
+    Abstract base class for snapshot storage adapters.
+    """
+
+    @abstractmethod
+    def query(self, dataset_id: Optional[ZfsDatasetId]) -> list[SnapshotGraph]:
+        """
+        Query for snapshot graphs for a dataset.
+        """
+        pass
+
+    @abstractmethod
+    def destroy(self, node: SnapshotNode):
+        """
+        Destroy a snapshot node in storage.
+        """
+        pass
+
+    @abstractmethod
+    def send(self, node: SnapshotNode, blocksize: int = 4096) -> Iterable[bytes]:
+        """
+        Send a snapshot file as a stream.
+        """
+        pass
+
+    @abstractmethod
+    def subscribe(self, stream: SnapshotStream):
+        """
+        Registers a generator with the stream for iteration of each chunk
+        """
+        pass
 
 
 class RemoteSnapshotManager(BaseModel):
@@ -142,43 +173,6 @@ class RemoteSnapshotManager(BaseModel):
             f"[RemoteStorageAdapter] Stream successfully built for adapter={self.adapter} with node={node}"
         )
         return stream
-
-    def recv(self,
-             stream: SnapshotStream,
-             graph: SnapshotGraph,
-             dryrun: bool = False,
-             duplicate_policy: DuplicateDetectedPolicy = 'error'):
-        """Receives a snapshot stream and adds it to the graph and storage backend.
-
-        Args:
-            stream (SnapshotStream): The snapshot stream to receive.
-            graph (SnapshotGraph): The snapshot graph to update.
-            dryrun (bool, optional): If True, only updates graph. Defaults to False.
-            duplicate_policy (DuplicateDetectedPolicy, optional): How to handle duplicates.
-                Defaults to 'error'.
-
-        Raises:
-            ValueError: If duplicate node is detected and policy is 'error'.
-
-        Notes:
-            - Updates both graph and storage backend
-            - Checks for duplicate nodes before receiving
-            - Supports different duplicate handling policies
-            - Log messages track operation progress
-        """
-        logger.info(
-            f"[RemoteStorageAdapter] Recieving stream for adapter={self.adapter} and node={stream.node}")
-        is_duplicate = stream.node in graph.get_nodes()
-        if not is_duplicate:
-            graph.add(stream.node)
-        elif duplicate_policy == 'error':
-            raise ValueError(
-                f'Cannot recv stream = {stream} duplicate node = {stream.node} for adapter = {self.adapter}'
-            )
-        if not dryrun:
-            self.adapter.recv(stream)
-        logger.info(
-            f"[RemoteStorageAdapter] Recieved stream for adapter={self.adapter} and node={stream.node}")
 
     def subscribe(self,
                   stream: SnapshotStream,
@@ -310,69 +304,6 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
                 logger.warning(f"File not found during destroy: {fp}")
         logger.info(f"[LocalFileStorageAdapter] destroy called for node={node}")
 
-    def recv(self, stream: SnapshotStream):
-        """
-        Receive a snapshot stream and write it to the local filesystem, splitting into multiple files if max_file_size is set.
-
-        Args:
-            stream (SnapshotStream): The snapshot stream to receive.
-
-        Raises:
-            FileNotFoundError: If the parent directory cannot be created or file cannot be written.
-            OSError: If there is an OS error during file operations.
-        """
-        logger.debug(f"[LocalFileStorageAdapter] recv called for stream.node={stream.node}")
-        path = self.directory.joinpath(stream.node.filepath)
-        logger.info(f"Receiving snapshot stream to {path}")
-        # create the parent dirs if they don't exist
-        if not path.parent.exists():
-            logger.debug(f"Creating parent directories {path}")
-            path.parent.mkdir(parents=True)
-
-        # define a helper function to open the file and write the stream in using context manager
-        def write_bytes(path: PurePath,
-                        bytes_stream: Iterable[bytes],
-                        buffer: bytes = b'') -> Iterable[bytes] | None:
-            """Writes a byte stream to a file, handling file size limits.
-
-            Args:
-                path (PurePath): The path where the file will be written
-                bytes_stream (Iterable[bytes]): Iterator yielding bytes to write
-                buffer (bytes, optional): Initial buffer of bytes to write. Defaults to b''.
-
-            Returns:
-                Iterable[bytes] | None: Remaining bytes if max_file_size was reached, None if all bytes were written
-
-            Notes:
-                - Creates new files when max_file_size is reached
-                - Uses context manager for safe file handling
-            """
-            file_size = len(buffer)
-            with open(path, 'wb') as handle:
-                # write out the data from the last iteration if passed in
-                if buffer:
-                    handle.write(buffer)
-                # write out until out of data or at max file size
-                for chunk in bytes_stream:
-                    chunk_size = len(chunk)
-                    if (self.max_file_size is not None) and ((file_size + chunk_size)
-                                                             > self.max_file_size):
-                        split_index = self.max_file_size - file_size
-                        left, right = chunk[0:split_index], chunk[split_index:]
-                        handle.write(left)
-                        return right
-                    file_size += len(chunk)
-                    handle.write(chunk)
-
-        # use the write_bytes method to write out data to each file
-        file_index = 0
-        remaining_bytes = write_bytes(path, stream.bytes_stream)
-        while remaining_bytes is not None:
-            file_index += 1
-            next_path = path.with_name(f"{path.stem}_{file_index}{path.suffix}")
-            remaining_bytes = write_bytes(next_path, stream.bytes_stream, remaining_bytes)
-        logger.info(f"[LocalFileStorageAdapter] recv and wrote bytes for stream.node={stream.node}")
-
     def subscribe(self, stream: SnapshotStream):
         logger.debug(f"[LocalFileStorageAdapter] subscribe called for stream.node={stream.node}")
         # build a function that can handle a single chunck
@@ -496,6 +427,12 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
             logger.info(f"Successfully sent snapshot file(s) for {base_path}")
 
         return _snapshot_stream()
+
+
+# Configure Dropbox SDK logging to only show warnings when level = INFO as info is closer to debug.
+dropbox_logger = logging.getLogger('dropbox')
+if logger.level == logging.INFO:
+    dropbox_logger.setLevel(logging.WARNING)
 
 
 class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):

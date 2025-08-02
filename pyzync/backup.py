@@ -7,9 +7,9 @@ import logging
 from pydantic import BaseModel, ConfigDict
 
 from pyzync.host import HostSnapshotManager
-from pyzync.storage_adapters import RemoteSnapshotManager
+from pyzync.storage_adapters import SnapshotStorageAdapter, RemoteSnapshotManager
 from pyzync.retention_policies import RetentionPolicy
-from pyzync.interfaces import ZfsDatasetId, SnapshotGraph, DuplicateDetectedPolicy, SnapshotStorageAdapter, Datetime
+from pyzync.interfaces import ZfsDatasetId, SnapshotGraph, DuplicateDetectedPolicy, Datetime
 
 logger = logging.getLogger(__name__)
 

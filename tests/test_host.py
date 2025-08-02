@@ -1,6 +1,5 @@
 import unittest
 
-from pyzync.errors import DataIntegrityError, DataCorruptionError
 from pyzync.interfaces import SnapshotNode, Datetime, SnapshotGraph, SnapshotStream
 from pyzync.host import HostSnapshotManager
 

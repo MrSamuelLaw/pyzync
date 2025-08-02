@@ -1,5 +1,4 @@
 import unittest
-from itertools import chain
 from datetime import datetime
 
 from pyzync.interfaces import (ZfsDatasetId, ZfsFilePath, ZfsSnapshotId, Datetime, SnapshotNode,
