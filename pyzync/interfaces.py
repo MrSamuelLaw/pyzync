@@ -414,31 +414,33 @@ class SnapshotStream(BaseModel):
         def consumer_worker(consumer):
             """Function that pushes data to a consumer generator asyncrounously. 
             """
-            try:
-                logger.debug(f"Consumer thread {threading.current_thread().name} started.")
-                write_barrier.wait()  # allow the first iteration
-                faulted = False
-                while True:
-                    read_barrier.wait()
-                    chunk = shared['chunk']
-                    try:
-                        if not faulted:
-                            cycle_start = time.time()
-                            consumer.send(chunk)
-                            cycle_end = time.time()
-                            bytes_per_second = compute_speed(cycle_start, cycle_end, len(chunk))
-                            logger.debug(
-                                f"[{threading.current_thread().name}] Last chunk consumed at a rate of {bytes_per_second}"
-                            )
-                    except Exception:
-                        faulted = True
-                        logger.exception(
-                            f"Consumer thread {threading.current_thread().name} faulted...will discard future bytes"
+            logger.debug(f"Consumer thread {threading.current_thread().name} started.")
+            write_barrier.wait()  # allow the first iteration
+            faulted = False
+            while True:
+                read_barrier.wait()
+                chunk = shared['chunk']
+                try:
+                    if not faulted:
+                        cycle_start = time.time()
+                        consumer.send(chunk)
+                        cycle_end = time.time()
+                        bytes_per_second = compute_speed(cycle_start, cycle_end, len(chunk))
+                        logger.debug(
+                            f"[{threading.current_thread().name}] Last chunk consumed at a rate of {bytes_per_second}"
                         )
-                    write_barrier.wait()
-            except StopIteration:
-                logger.debug(f"Consumer {threading.current_thread().name} finished (StopIteration).")
-                return
+                    elif faulted and chunk is None:
+                        # ensures the loop exits once the end of stream is indicated via None
+                        raise StopIteration
+                except StopIteration:
+                    logger.debug(f"Consumer {threading.current_thread().name} finished (StopIteration).")
+                    return
+                except:
+                    faulted = True
+                    logger.exception(
+                        f"Consumer thread {threading.current_thread().name} faulted...will discard future bytes"
+                    )
+                write_barrier.wait()
 
         consumer_threads = []
         for consumer in self._consumers:
