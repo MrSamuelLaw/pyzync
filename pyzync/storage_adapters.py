@@ -430,7 +430,7 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
 
 
 # Configure Dropbox SDK logging to only show warnings when level = INFO as info is closer to debug.
-LOG_LEVEL = getattr(logging, os.environ.get('LOG_LEVEL'), logging.INFO)
+LOG_LEVEL = getattr(logging, os.environ.get('LOG_LEVEL', 'INFO'))
 if LOG_LEVEL == logging.INFO:
     dropbox_logger = logging.getLogger('dropbox')
     dropbox_logger.setLevel(logging.WARNING)
