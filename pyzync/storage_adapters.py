@@ -299,7 +299,12 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
         filepaths.insert(0, base_path)
         for fp in filepaths:
             try:
-                fp.unlink()
+                num_tries = 0
+                while fp.exists():
+                    num_tries = num_tries + 1
+                    fp.unlink()
+                    if num_tries >= 10:
+                        raise OSError(f'Unable to unlink file at {fp}')
             except FileNotFoundError as e:
                 logger.warning(f"File not found during destroy: {fp}")
         logger.info(f"[LocalFileStorageAdapter] destroy called for node={node}")
@@ -584,73 +589,6 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
                 logger.warning(f"Dropbox file could not be destroyed: {f}")
         logger.info(f"Successfully destroyed all files for {base_path}")
 
-    def recv(self, stream: SnapshotStream):
-        """
-        Receive a snapshot stream and upload it to Dropbox, splitting into multiple files if max_file_size is set.
-        Uses Dropbox upload sessions to support streaming large files.
-        """
-        dbx = self._client()
-        path = self.directory.joinpath(stream.node.filepath)
-        logger.debug(f"[DropboxStorageAdapter] recv called for stream.node={stream.node}")
-        # calls to dbx.files_upload_session_append_v2 must be a multiple of this many bytes
-        # except for the last call with UploadSessionStartArg.close to True.
-        WINDOW_LENGTH = 4 * (2**20)  # 4MB
-
-        def write_bytes(path: PurePath,
-                        bytes_stream: Iterable[bytes],
-                        buffer: bytes = b'') -> Iterable[bytes] | None:
-            """Writes a byte stream to Dropbox using upload sessions.
-
-            Args:
-                path (PurePath): The path where the file will be stored in Dropbox
-                bytes_stream (Iterable[bytes]): Iterator yielding bytes to upload
-                buffer (bytes, optional): Initial buffer of bytes to upload. Defaults to b''.
-
-            Returns:
-                Iterable[bytes] | None: Remaining bytes if max_file_size was reached, None if all bytes were uploaded
-
-            Notes:
-                - Uses Dropbox upload sessions for large file support
-                - Splits files when they exceed max_file_size
-                - Maintains WINDOW_LENGTH chunks for optimal upload performance
-            """
-            # start the file upload session
-            file_size = len(buffer)
-            result = dbx.files_upload_session_start(buffer)
-            session_id = result.session_id
-            buffer = b''  # clear the buffer after starting session
-            # pipe chunks into the session using WINDOW_LENGTH for each push
-            for chunk in bytes_stream:
-                buffer += chunk
-                if (self.max_file_size is not None) and ((file_size + len(buffer)) > self.max_file_size):
-                    split_index = self.max_file_size - file_size
-                    left, right = buffer[0:split_index], buffer[split_index:]
-                    dbx.files_upload_session_finish(
-                        left, dropbox.files.UploadSessionCursor(session_id, file_size),
-                        dropbox.files.CommitInfo(str(path), mode=dropbox.files.WriteMode.overwrite))
-                    return right
-                else:
-                    while len(buffer) >= WINDOW_LENGTH:
-                        # grab a chunk of the buffer
-                        data, buffer = buffer[:WINDOW_LENGTH], buffer[WINDOW_LENGTH:]
-                        # perform the upload
-                        dbx.files_upload_session_append_v2(
-                            data, dropbox.files.UploadSessionCursor(session_id, file_size))
-                        file_size += len(data)
-            # if the iteration ended and the buffer still has data, end the session
-            dbx.files_upload_session_finish(
-                buffer, dropbox.files.UploadSessionCursor(session_id, file_size),
-                dropbox.files.CommitInfo(str(path), mode=dropbox.files.WriteMode.overwrite))
-
-        # use the write_bytes method to write out data to each file
-        file_index = 0
-        remaining_bytes = write_bytes(path, stream.bytes_stream)
-        while remaining_bytes is not None:
-            file_index += 1
-            next_path = path.with_name(f"{path.stem}_{file_index}{path.suffix}")
-            remaining_bytes = write_bytes(next_path, stream.bytes_stream, remaining_bytes)
-        logger.info(f"Successfully received and wrote snapshot stream to Dropbox at {path}")
-
     def subscribe(self, stream: SnapshotStream):
         """Subscribe to a snapshot stream and handle incoming chunks for Dropbox upload.
         
@@ -686,6 +624,7 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
                     # once the iterator is primed it starts here
                     chunk = yield
                     if chunk is None:
+                        logger.info(f'[DropboxStorageAdapter] stopping consumer for {self}')
                         break
                     if session_id is None:
                         dbx = self._client()
@@ -718,6 +657,14 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
                                 data, dropbox.files.UploadSessionCursor(session_id, file_size))
                             file_size += len(data)
                 if buffer and session_id:
+                    while len(buffer) >= MODULO:
+                        # Calculate largest slice that's divisible by MODULO and less than MAX_SIZE
+                        slice_size = min(len(buffer) - (len(buffer) % MODULO), MAX_SIZE)
+                        data, buffer = buffer[:slice_size], buffer[slice_size:]
+                        # perform the upload
+                        dbx.files_upload_session_append_v2(
+                            data, dropbox.files.UploadSessionCursor(session_id, file_size))
+                        file_size += len(data)
                     dbx.files_upload_session_finish(
                         buffer, dropbox.files.UploadSessionCursor(session_id, file_size),
                         dropbox.files.CommitInfo(str(cur_path), mode=dropbox.files.WriteMode.overwrite))
