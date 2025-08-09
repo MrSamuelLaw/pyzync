@@ -7,15 +7,16 @@ for different storage backends. Currently supports local filesystem storage.
 import os
 import re
 import time
-import dropbox
 import logging
 from abc import ABC, abstractmethod
 from pathlib import Path, PurePath
-from typing import Optional, Iterable
+from typing import Optional, Iterable, cast, Sequence
 from itertools import groupby
 
+import dropbox
+from dropbox import exceptions as dbe
+from dropbox import files as dbf
 from pydantic import BaseModel, ConfigDict, field_validator, SecretStr
-
 from pyzync.errors import DataIntegrityError
 from pyzync.interfaces import (SnapshotStream, DuplicateDetectedPolicy, ZfsDatasetId, ZfsFilePath,
                                SnapshotNode, SnapshotGraph)
@@ -29,7 +30,7 @@ class SnapshotStorageAdapter(ABC):
     """
 
     @abstractmethod
-    def query(self, dataset_id: Optional[ZfsDatasetId]) -> list[SnapshotGraph]:
+    def query(self, dataset_id: Optional[ZfsDatasetId]) -> Sequence[ZfsFilePath]:
         """
         Query for snapshot graphs for a dataset.
         """
@@ -65,6 +66,9 @@ class RemoteSnapshotManager(BaseModel):
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
     adapter: SnapshotStorageAdapter
+
+    def __str__(self):
+        return f"RemoteSnapshotManager(adapter={str(self.adapter)})"
 
     def query(self, dataset_id: Optional[ZfsDatasetId] = None):
         """
@@ -264,7 +268,7 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
         matches = {r.relative_to(self.directory) for r in matches}
 
         def filt(results):
-            matches = set()
+            matches: set[ZfsFilePath] = set()
             for r in results:
                 try:
                     matches.add(ZfsFilePath(str(r)))
@@ -272,7 +276,7 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
                     pass
             return matches
 
-        matches = filt(matches)
+        matches = list(filt(matches))
         return matches
 
     def destroy(self, node: SnapshotNode):
@@ -298,15 +302,7 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
         filepaths = sorted(filepaths, key=lambda f: int(f.stem.split('_')[-1]))
         filepaths.insert(0, base_path)
         for fp in filepaths:
-            try:
-                num_tries = 0
-                while fp.exists():
-                    num_tries = num_tries + 1
-                    fp.unlink()
-                    if num_tries >= 10:
-                        raise OSError(f'Unable to unlink file at {fp}')
-            except FileNotFoundError as e:
-                logger.warning(f"File not found during destroy: {fp}")
+            fp.unlink()
         logger.info(f"[LocalFileStorageAdapter] destroy called for node={node}")
 
     def subscribe(self, stream: SnapshotStream):
@@ -455,6 +451,9 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
     access_token: Optional[SecretStr] = None
     max_file_size: int = 350 * (2**30)  # 350 GB
 
+    def __str__(self):
+        return f"DropboxStorageAdapter(directory={self.directory}, max_file_size={self.max_file_size})"
+
     @field_validator('directory')
     @classmethod
     def validate_path(cls, directory: PurePath):
@@ -529,8 +528,8 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
                 - Returns empty list if folder doesn't exist
             """
             try:
-                res = dbx.files_list_folder(folder, recursive=True)
-            except dropbox.exceptions.ApiError:
+                res = cast(dbf.ListFolderResult, dbx.files_list_folder(folder, recursive=True))
+            except dbe.ApiError:
                 return []
             entries = res.entries
             while res.has_more:
@@ -616,9 +615,11 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
                 - Handles upload session management and cleanup
             """
             file_index = 0
+            file_size = 0
             cur_path = path
             session_id = None
             buffer = b''
+            dbx = None
             try:
                 while True:
                     # once the iterator is primed it starts here
@@ -656,7 +657,7 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
                             dbx.files_upload_session_append_v2(
                                 data, dropbox.files.UploadSessionCursor(session_id, file_size))
                             file_size += len(data)
-                if buffer and session_id:
+                if buffer and session_id and dbx:
                     while len(buffer) >= MODULO:
                         # Calculate largest slice that's divisible by MODULO and less than MAX_SIZE
                         slice_size = min(len(buffer) - (len(buffer) % MODULO), MAX_SIZE)
