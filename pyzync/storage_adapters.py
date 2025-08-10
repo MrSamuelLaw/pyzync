@@ -86,6 +86,7 @@ class RemoteSnapshotManager(BaseModel):
         )
         files = self.adapter.query(dataset_id)
         nodes = [SnapshotNode.from_zfs_filepath(f) for f in files]
+        nodes = sorted(nodes, key=lambda n: n.dataset_id)  # sort so the groupby works
         graphs: list[SnapshotGraph] = []
         for dataset_id, group in groupby(nodes, key=lambda n: n.dataset_id):
             graph = SnapshotGraph(dataset_id=dataset_id)
