@@ -436,10 +436,10 @@ class SnapshotStream(BaseModel):
                 except StopIteration:
                     logger.debug(f"Consumer {threading.current_thread().name} finished (StopIteration).")
                     return
-                except:
+                except Exception as e:
                     faulted = True
                     logger.exception(
-                        f"Consumer thread {threading.current_thread().name} faulted...will discard future bytes"
+                        f"Consumer thread {threading.current_thread().name} faulted the folloing excetion...will discard future bytes\n{e}"
                     )
                 write_barrier.wait()
 
@@ -472,9 +472,11 @@ class SnapshotStream(BaseModel):
         bytes_per_second = compute_speed(publish_start, publish_end, total_bytes)
         logger.info(f"Publish completed with an average transfer rate of {bytes_per_second}")
 
+        logger.debug(f"waiting on write barrier with count = {write_barrier._count}")
         write_barrier.wait()
         shared['chunk'] = None
         logger.debug("Main thread published final chunk (None)")
+        logger.debug(f"waiting on read barrier with count = {read_barrier._count}")
         read_barrier.wait()
         for t in consumer_threads:
             t.join()

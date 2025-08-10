@@ -14,8 +14,8 @@ from typing import Optional, Iterable, cast, Sequence
 from itertools import groupby
 
 import dropbox
-from dropbox import exceptions as dbe
-from dropbox import files as dbf
+from dropbox import exceptions as dbx_exceptions
+from dropbox import files as dbx_files
 from pydantic import BaseModel, ConfigDict, field_validator, SecretStr
 from pyzync.errors import DataIntegrityError
 from pyzync.interfaces import (SnapshotStream, DuplicateDetectedPolicy, ZfsDatasetId, ZfsFilePath,
@@ -368,6 +368,7 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
                     _logged_write(handle, chunk)
             except IOError as e:
                 logger.exception(f"Error writing to {cur_path}: {e}")
+                raise
             finally:
                 if handle:
                     handle.close()
@@ -514,14 +515,14 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
         else:
             path = self.directory.joinpath(dataset_id)
         # Recursively list all .zfs files
-        def list_files(folder):
+        def list_files(folder: str):
             """Lists all files in a Dropbox folder recursively.
 
             Args:
                 folder (str): The Dropbox folder path to list
 
             Returns:
-                list[dropbox.files.FileMetadata]: List of file metadata objects
+                list[dbx_files.FileMetadata]: List of file metadata objects
 
             Notes:
                 - Handles pagination for large directories
@@ -529,14 +530,14 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
                 - Returns empty list if folder doesn't exist
             """
             try:
-                res = cast(dbf.ListFolderResult, dbx.files_list_folder(folder, recursive=True))
-            except dbe.ApiError:
+                res = dbx.files_list_folder(folder, recursive=True)
+            except dbx_exceptions.ApiError:
                 return []
             entries = res.entries
             while res.has_more:
                 res = dbx.files_list_folder_continue(res.cursor)
                 entries.extend(res.entries)
-            return [e for e in entries if isinstance(e, dropbox.files.FileMetadata)]
+            return [e for e in entries if isinstance(e, dbx_files.FileMetadata)]
 
         files = list_files(str(path))
         # Filter for .zfs files and convert to ZfsFilePath relative to root_path
@@ -566,15 +567,13 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
         def list_files(folder):
             try:
                 res = dbx.files_list_folder(str(folder))
-            except dropbox.exceptions.ApiError:
+            except dbx_exceptions.ApiError:
                 return []
             entries = res.entries
             while res.has_more:
-                res = dbx.files_list_folder_continue(res.cursor)
+                res = cast(dbx_files.ListFolderResult, dbx.files_list_folder_continue(res.cursor))
                 entries.extend(res.entries)
-            return [
-                PurePath(e.path_display) for e in entries if isinstance(e, dropbox.files.FileMetadata)
-            ]
+            return [PurePath(e.path_display) for e in entries if isinstance(e, dbx_files.FileMetadata)]
 
         # Find all chunked files: base, _1, _2, ...
         pattern = re.compile(rf"{re.escape(stem)}_\d+{re.escape(suffix)}")
@@ -585,7 +584,7 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
         for f in filepaths:
             try:
                 dbx.files_delete_v2(str(f))
-            except dropbox.exceptions.ApiError as e:
+            except dbx_exceptions.ApiError as e:
                 logger.warning(f"Dropbox file could not be destroyed: {f}")
         logger.info(f"Successfully destroyed all files for {base_path}")
 
@@ -640,9 +639,8 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
                         split_index = self.max_file_size - file_size
                         left, right = buffer[0:split_index], buffer[split_index:]
                         dbx.files_upload_session_finish(
-                            left, dropbox.files.UploadSessionCursor(session_id, file_size),
-                            dropbox.files.CommitInfo(str(cur_path),
-                                                     mode=dropbox.files.WriteMode.overwrite))
+                            left, dbx_files.UploadSessionCursor(session_id, file_size),
+                            dbx_files.CommitInfo(str(cur_path), mode=dbx_files.WriteMode.overwrite))
                         buffer = right
                         file_index += 1
                         cur_path = path.with_name(f"{path.stem}_{file_index}{path.suffix}")
@@ -656,7 +654,7 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
                             data, buffer = buffer[:slice_size], buffer[slice_size:]
                             # perform the upload
                             dbx.files_upload_session_append_v2(
-                                data, dropbox.files.UploadSessionCursor(session_id, file_size))
+                                data, dbx_files.UploadSessionCursor(session_id, file_size))
                             file_size += len(data)
                 if buffer and session_id and dbx:
                     while len(buffer) >= MODULO:
@@ -665,13 +663,14 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
                         data, buffer = buffer[:slice_size], buffer[slice_size:]
                         # perform the upload
                         dbx.files_upload_session_append_v2(
-                            data, dropbox.files.UploadSessionCursor(session_id, file_size))
+                            data, dbx_files.UploadSessionCursor(session_id, file_size))
                         file_size += len(data)
                     dbx.files_upload_session_finish(
-                        buffer, dropbox.files.UploadSessionCursor(session_id, file_size),
-                        dropbox.files.CommitInfo(str(cur_path), mode=dropbox.files.WriteMode.overwrite))
+                        buffer, dbx_files.UploadSessionCursor(session_id, file_size),
+                        dbx_files.CommitInfo(str(cur_path), mode=dbx_files.WriteMode.overwrite))
             except:
                 logger.exception('Failed to consume bytes for dropbox remote')
+                raise
 
         consumer = consume_bytes(path=path)
         next(consumer)  # Prime the generator
@@ -693,13 +692,13 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
         def list_files(folder):
             try:
                 res = dbx.files_list_folder(folder)
-            except dropbox.exceptions.ApiError:
+            except dbx_exceptions.ApiError:
                 return []
             entries = res.entries
             while res.has_more:
                 res = dbx.files_list_folder_continue(res.cursor)
                 entries.extend(res.entries)
-            return [e for e in entries if isinstance(e, dropbox.files.FileMetadata)]
+            return [e for e in entries if isinstance(e, dbx_files.FileMetadata)]
 
         files = list_files(str(directory))
         files = list_files(str(directory))
