@@ -412,8 +412,8 @@ class SnapshotStream(BaseModel):
             return bytes_per_second
 
         def consumer_worker(consumer):
-            """Function that pushes data to a consumer generator asyncrounously. 
-            """
+            """Function that pushes data to a consumer generator asynchronously.
+            After a fault, skips consumer.send(chunk) but continues to participate in barriers until end of stream."""
             logger.debug(f"Consumer thread {threading.current_thread().name} started.")
             write_barrier.wait()  # allow the first iteration
             faulted = False
@@ -429,7 +429,8 @@ class SnapshotStream(BaseModel):
                         logger.debug(
                             f"[{threading.current_thread().name}] Last chunk consumed at a rate of {bytes_per_second}"
                         )
-                    elif faulted and chunk is None:
+                    # If faulted, just skip consumer.send(chunk) and proceed
+                    if chunk is None:
                         # ensures the loop exits once the end of stream is indicated via None
                         raise StopIteration
                 except StopIteration:
