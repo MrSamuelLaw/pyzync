@@ -250,3 +250,7 @@ class TestDropboxLoopCheck(unittest.TestCase):
             path = Path(f'/tank0/foo/{datetimes[-1]}.txt')
             self.assertTrue(path.exists())
             path.unlink()
+
+
+if __name__ == '__main__':
+    unittest.main(verbosity=2)
