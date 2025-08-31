@@ -9,11 +9,13 @@ from typing import Optional, Iterable, AsyncIterator
 
 from pydantic import validate_call
 
+from pyzync.otel import trace, with_tracer
 from pyzync.errors import DataIntegrityError
 from pyzync.interfaces import (ZfsDatasetId, SnapshotNode, SnapshotGraph, SnapshotStream, Datetime,
                                DATETIME_REGEX)
 
 logger = logging.getLogger(__name__)
+tracer = trace.get_tracer(__name__)
 
 
 class HostSnapshotManager:
@@ -25,6 +27,7 @@ class HostSnapshotManager:
     """
 
     @staticmethod
+    @with_tracer(tracer)
     @validate_call
     def create(dt: Datetime, graph: SnapshotGraph, dryrun: bool = False):
         """
@@ -60,6 +63,7 @@ class HostSnapshotManager:
             raise
 
     @staticmethod
+    @with_tracer(tracer)
     @validate_call
     def query(dataset_id: Optional[ZfsDatasetId] = None):
         """
@@ -112,6 +116,7 @@ class HostSnapshotManager:
             raise
 
     @staticmethod
+    @with_tracer(tracer)
     @validate_call
     def destroy(node: SnapshotNode, graph: SnapshotGraph, dryrun: bool = False):
         """
@@ -142,6 +147,7 @@ class HostSnapshotManager:
             raise
 
     @staticmethod
+    @with_tracer(tracer)
     @validate_call
     def send(
             dt: Datetime,
@@ -232,6 +238,7 @@ class HostSnapshotManager:
         return stream
 
     @staticmethod
+    @with_tracer(tracer)
     @validate_call
     def recv(stream: SnapshotStream,
              graph: SnapshotGraph,

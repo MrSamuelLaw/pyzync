@@ -6,12 +6,14 @@ import logging
 
 from pydantic import BaseModel, ConfigDict
 
+from pyzync.otel import trace, with_tracer
 from pyzync.host import HostSnapshotManager
 from pyzync.storage_adapters import SnapshotStorageAdapter, RemoteSnapshotManager
 from pyzync.retention_policies import RetentionPolicy
 from pyzync.interfaces import ZfsDatasetId, SnapshotGraph, DuplicateDetectedPolicy, Datetime
 
 logger = logging.getLogger(__name__)
+tracer = trace.get_tracer(__name__)
 
 
 class BackupJob(BaseModel):
@@ -25,6 +27,7 @@ class BackupJob(BaseModel):
     buffer_length: int = 100 * (2**20)  # 100 MB is the default buffer length
     adapters: list[SnapshotStorageAdapter]
 
+    @with_tracer(tracer)
     def rotate(self,
                dataset_id: ZfsDatasetId,
                host: HostSnapshotManager = HostSnapshotManager,
@@ -58,6 +61,7 @@ class BackupJob(BaseModel):
             logger.exception(f"Exception during rotation for {dataset_id}")
             raise
 
+    @with_tracer(tracer)
     def sync(self,
              dataset_id: ZfsDatasetId,
              host: HostSnapshotManager = HostSnapshotManager,
@@ -82,6 +86,7 @@ class BackupJob(BaseModel):
         graphs = host.query(dataset_id)
         host_graph = graphs[0] if graphs else SnapshotGraph(dataset_id=dataset_id)
         chain = sorted(list(host_graph.get_nodes()), key=lambda node: node.dt)
+
         remotes: list[tuple[RemoteSnapshotManager, SnapshotGraph]] = []
         for adapter in self.adapters:
             # get the graph for the remote
@@ -96,13 +101,13 @@ class BackupJob(BaseModel):
             HostSnapshotManager.send(node.dt, host_graph, parent.dt)
             for node, parent in zip(chain[1:], chain)
         ])
+
         for stream in streams:
             for manager, remote_graph in remotes:
                 logger.info(f"Subscribing manager {manager} to  stream {stream}")
                 manager.subscribe(stream, remote_graph, dryrun=dryrun, duplicate_policy=duplicate_policy)
             stream.publish()
 
-        # destroy old nodes from tip to root by using reverse=True
         streamed_nodes = [stream.node for stream in streams]
         for manager, remote_graph in remotes:
             old_nodes = [node for node in remote_graph.get_nodes() if node not in streamed_nodes]

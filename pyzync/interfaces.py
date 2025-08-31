@@ -12,7 +12,10 @@ from pydantic import (BaseModel, model_validator, computed_field, ConfigDict, Ge
                       validate_call)
 from pydantic_core import CoreSchema, core_schema
 
+from pyzync.otel import trace, with_tracer, LoggingHandler
+
 logger = logging.getLogger(__name__)
+tracer = trace.get_tracer(__name__)
 
 DATETIME_FORMAT = r"%Y%m%dT%H%M%S"
 DATETIME_REGEX = r'\d{8}T\d{6}'
@@ -386,6 +389,7 @@ class SnapshotStream(BaseModel):
             raise ValueError('Cannot add duplicate consumers')
         self._consumers.add(consumer)
 
+    @with_tracer(tracer)
     def publish(self):
         num_consumers = len(self._consumers)
         logger.debug(f"Publishing to {num_consumers} consumers for node {self.node}")
@@ -411,6 +415,7 @@ class SnapshotStream(BaseModel):
             bytes_per_second = format_speed(bytes_per_second)
             return bytes_per_second
 
+        @with_tracer(tracer)
         def consumer_worker(consumer):
             """Function that pushes data to a consumer generator asynchronously.
             After a fault, skips consumer.send(chunk) but continues to participate in barriers until end of stream."""

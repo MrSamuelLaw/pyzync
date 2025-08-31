@@ -20,8 +20,10 @@ from pydantic import BaseModel, ConfigDict, field_validator, SecretStr
 from pyzync.errors import DataIntegrityError
 from pyzync.interfaces import (SnapshotStream, DuplicateDetectedPolicy, ZfsDatasetId, ZfsFilePath,
                                SnapshotNode, SnapshotGraph)
+from pyzync.otel import trace, with_tracer
 
 logger = logging.getLogger(__name__)
+tracer = trace.get_tracer(__name__)
 
 
 class SnapshotStorageAdapter(ABC):
@@ -70,6 +72,7 @@ class RemoteSnapshotManager(BaseModel):
     def __str__(self):
         return f"RemoteSnapshotManager(adapter={str(self.adapter)})"
 
+    @with_tracer(tracer)
     def query(self, dataset_id: Optional[ZfsDatasetId] = None):
         """
         Query all snapshots for a given dataset or all datasets from the adapter.
@@ -96,6 +99,7 @@ class RemoteSnapshotManager(BaseModel):
                     f"with dataset_id={dataset_id} returned {len(graphs)} graphs")
         return graphs
 
+    @with_tracer(tracer)
     def destroy(self,
                 node: SnapshotNode,
                 graph: SnapshotGraph,
@@ -143,6 +147,7 @@ class RemoteSnapshotManager(BaseModel):
             f"[RemoteStorageAdapter] Successfully destroyed called for adapter={self.adapter} with node={node}"
         )
 
+    @with_tracer(tracer)
     def send(self,
              node: SnapshotNode,
              graph: SnapshotGraph,
@@ -179,6 +184,7 @@ class RemoteSnapshotManager(BaseModel):
         )
         return stream
 
+    @with_tracer(tracer)
     def subscribe(self,
                   stream: SnapshotStream,
                   graph: SnapshotGraph,
@@ -251,6 +257,7 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
     def __str__(self):
         return f"LocalFileStorageAdapter(directory={self.directory}, max_file_size={self.max_file_size})"
 
+    @with_tracer(tracer)
     def query(self, dataset_id: Optional[ZfsDatasetId] = None):
         """
         Query all .zfs files in the directory for a given dataset or all datasets.
@@ -280,6 +287,7 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
         matches = list(filt(matches))
         return matches
 
+    @with_tracer(tracer)
     def destroy(self, node: SnapshotNode):
         """
         Destroy a snapshot file at the given file path.
@@ -306,6 +314,7 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
             fp.unlink()
         logger.info(f"[LocalFileStorageAdapter] destroy called for node={node}")
 
+    @with_tracer(tracer)
     def subscribe(self, stream: SnapshotStream):
         logger.debug(f"[LocalFileStorageAdapter] subscribe called for stream.node={stream.node}")
         # build a function that can handle a single chunck
@@ -316,6 +325,7 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
             path.parent.mkdir(parents=True)
 
         # define a helper function to open the file and write the stream in using context manager
+        @with_tracer(tracer)
         def consume_bytes(path: PurePath):
             """Consumes bytes from a stream and writes them to files, splitting across multiple files if needed.
 
@@ -377,6 +387,7 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
         next(consumer)
         stream.register(consumer)
 
+    @with_tracer(tracer)
     def send(self, node: SnapshotNode, blocksize: int = 2**20):  # default blocksize = 1MB
         """
         Send a snapshot file as a stream from the local filesystem, including chunked files in order.
@@ -408,6 +419,7 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
         filepaths = sorted(filepaths, key=lambda f: int(f.stem.split('_')[-1]))
         filepaths.insert(0, base_path)
 
+        @with_tracer(tracer)
         def _snapshot_stream():
             """Generates a stream of bytes from a series of snapshot files.
 
@@ -503,6 +515,7 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
                 "Dropbox credentials not found. Set DROPBOX_REFRESH_TOKEN, DROPBOX_KEY, DROPBOX_SECRET or DROPBOX_TOKEN in your environment."
             )
 
+    @with_tracer(tracer)
     def query(self, dataset_id: Optional[ZfsDatasetId] = None):
         """
         Query all .zfs files in Dropbox for a given dataset or all datasets.
@@ -552,6 +565,7 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
                     pass
         return matches
 
+    @with_tracer(tracer)
     def destroy(self, node: SnapshotNode):
         """
         Delete a snapshot file and all chunked files from Dropbox.
@@ -588,6 +602,7 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
                 logger.warning(f"Dropbox file could not be destroyed: {f}")
         logger.info(f"Successfully destroyed all files for {base_path}")
 
+    @with_tracer(tracer)
     def subscribe(self, stream: SnapshotStream):
         """Subscribe to a snapshot stream and handle incoming chunks for Dropbox upload.
         
@@ -600,6 +615,7 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
         MODULO = 4 * (2**20)  # 4MB
         MAX_SIZE = 144 * (2**20)  # 144 MB
 
+        @with_tracer(tracer)
         def consume_bytes(path: PurePath):
             """Consumes bytes from a stream and uploads them to Dropbox, splitting into chunks if needed.
 
@@ -676,6 +692,7 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
         next(consumer)  # Prime the generator
         stream.register(consumer)
 
+    @with_tracer(tracer)
     def send(self, node: SnapshotNode, blocksize: int = 2**20):
         """
         Download a snapshot file and all chunked files from Dropbox as a stream.
