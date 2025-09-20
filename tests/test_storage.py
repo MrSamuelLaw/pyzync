@@ -2,8 +2,9 @@ import unittest
 from typing import Optional
 
 from pyzync.errors import DataIntegrityError
-from pyzync.interfaces import ZfsDatasetId, SnapshotStream, SnapshotGraph, SnapshotNode
-from pyzync.storage_adapters import SnapshotStorageAdapter, RemoteSnapshotManager
+from pyzync.interfaces import ZfsDatasetId, SnapshotGraph, SnapshotNode, ZfsFilePath
+from pyzync.streaming import SnapshotStreamProducer
+from pyzync.storage.interfaces import SnapshotStorageAdapter, RemoteSnapshotManager
 
 
 class FakeStorageAdapter(SnapshotStorageAdapter):
@@ -16,16 +17,20 @@ class FakeStorageAdapter(SnapshotStorageAdapter):
             '20250505T120002.zfs',
         ]
         filepaths = [dataset_id + '/' + fn for fn in filenames]
-        return filepaths
+        return [ZfsFilePath(fp) for fp in filepaths]
 
     def destroy(self, *args, **kwargs):
         pass
 
-    def send(self, *args, **kwargs):
+    def get_producer(self, *args, **kwargs):
         return [b'fake_bytes']
 
-    def subscribe(self, stream):
-        pass
+    def get_consumer(self, node):
+
+        def _fake_consumer():
+            bytes_ = yield  # pyright: ignore[reportUnusedVariable]
+
+        return _fake_consumer()
 
 
 class TestFileSnapshotManager(unittest.TestCase):
@@ -42,7 +47,7 @@ class TestFileSnapshotManager(unittest.TestCase):
         self.assertEqual(len(graph.get_chains()), 3)
 
         # verify the send works
-        stream = manager.send(graph.get_nodes().pop(), graph)
+        manager.get_producer(graph.get_nodes().pop(), graph)
 
         # verify the destroy works
         [manager.destroy(node, graph, force=True) for node in graph.get_nodes()]
@@ -96,9 +101,8 @@ class TestFileSnapshotManager(unittest.TestCase):
         # add a new nodes using a fake adapter
         manager = RemoteSnapshotManager(adapter=FakeStorageAdapter())
         new_node = SnapshotNode(dataset_id='tank0/foo', dt='20250505T120001')
-        stream = SnapshotStream(node=new_node, bytes_stream=(b'some_bytes',))
-        manager.subscribe(stream, graph)
-        stream.publish()
+        SnapshotStreamProducer(node=new_node, generator=(b'some_bytes',))
+        manager.get_consumer(new_node, graph)
         manager.destroy(nodes[0], graph, prune=True)
         chains = graph.get_chains()
         # only one chain should exist

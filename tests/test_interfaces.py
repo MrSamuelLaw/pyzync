@@ -2,7 +2,7 @@ import unittest
 from datetime import datetime
 
 from pyzync.interfaces import (ZfsDatasetId, ZfsFilePath, ZfsSnapshotId, Datetime, SnapshotNode,
-                               SnapshotStream, SnapshotGraph)
+                               SnapshotGraph)
 
 
 class TestZfsDatasetId(unittest.TestCase):
@@ -99,11 +99,12 @@ class TestSnapshotNode(unittest.TestCase):
         self.assertEqual(node.dataset_id, 'tank0/foo')
 
     def test_fails_with_newer_parent(self):
-        with self.assertRaises(ValueError) as ct:
-            SnapshotNode(dt='20250505T120001', parent_dt='20250505T120000')
+        with self.assertRaises(ValueError):
+            SnapshotNode(dt='20250505T120001', parent_dt='20250505T120000')  # type: ignore
 
     def test_can_build_from_snapshot_id(self):
-        node = SnapshotNode.from_zfs_snapshot_id('tank0/foo@20250505T120000')
+        node = SnapshotNode.from_zfs_snapshot_id(  # pyright: ignore[reportUnusedVariable]
+            'tank0/foo@20250505T120000')
 
     def test_can_build_from_complete_filepath(self):
         node = SnapshotNode.from_zfs_filepath('tank0/foo/20250505T120000.zfs')
@@ -212,35 +213,6 @@ class TestSnapshotGraph(unittest.TestCase):
         graph.remove(nodes[0])
         self.assertTrue(nodes[0].dt not in graph._table.keys(),
                         'Group expected to be removed upon last node bting deleted')
-
-
-class TestSnapshotStream(unittest.TestCase):
-
-    def test_can_build_stream(self):
-        node = SnapshotNode(dataset_id='tank0/foo', dt='20250505T120000')
-        stream = SnapshotStream(node=node, bytes_stream=(x for x in b'somebytes'))
-        self.assertEqual(stream.node, node)
-
-    def test_can_register_and_publish(self):
-
-        context = 0
-
-        def consumer():
-            nonlocal context
-            while True:
-                chunk = yield
-                if chunk is None:
-                    break
-                context += 1
-
-        consumer = consumer()
-        next(consumer)
-
-        node = SnapshotNode(dataset_id='tank0/foo', dt='20250505T120000')
-        stream = SnapshotStream(node=node, bytes_stream=(bytes(x) for x in b'0123456789'))
-        stream.register(consumer)
-        stream.publish()
-        self.assertEqual(context, 10)
 
 
 if __name__ == '__main__':

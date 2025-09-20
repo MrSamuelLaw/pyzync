@@ -1,24 +1,26 @@
 import shutil
+import asyncio
 import unittest
 from os import environ
 from pathlib import Path
 
-from pyzync.host import HostSnapshotManager
-from pyzync.retention_policies import LastNSnapshotsPolicy
-from pyzync.interfaces import SnapshotGraph, Datetime
-from pyzync.storage_adapters import RemoteSnapshotManager, LocalFileStorageAdapter, DropboxStorageAdapter
 from pyzync.backup import BackupJob
+from pyzync.host import HostSnapshotManager
+from pyzync.streaming import SnapshotStreamManager
+from pyzync.interfaces import SnapshotGraph, Datetime
+from pyzync.storage.interfaces import RemoteSnapshotManager
+from pyzync.storage.adapters.file import LocalFileStorageAdapter
+from pyzync.storage.adapters.dropbox import DropboxStorageAdapter
+from pyzync.retention.policies.last_n_days import LastNSnapshotsPolicy
 
 
-class TestLocalFileLoopCheck(unittest.TestCase):
+class TestLocalFileLoopCheck(unittest.IsolatedAsyncioTestCase):
 
-    def test_stream_using_pubsub(self):
-        """Test that ensures that data is able to be stored in chunks and restored
-        using the pubsub method
-        """
+    async def test_stream_using_pubsub(self):
 
         # get an instance of the adapter
         directory = Path(__file__).resolve().parent
+
         directory1 = directory.joinpath('test_loop_check_files/three')
         adapter = LocalFileStorageAdapter(directory=directory1, max_file_size=2**12)
         manager0 = RemoteSnapshotManager(adapter=adapter)
@@ -58,17 +60,20 @@ class TestLocalFileLoopCheck(unittest.TestCase):
 
         # create the first complete stream
         chain = sorted(list(host_graph.get_nodes()), key=lambda node: node.dt)
-        streams = [HostSnapshotManager.send(chain[0].dt, host_graph)]
+        producers = [HostSnapshotManager.get_producer(chain[0].dt, host_graph)]
 
         # create the incremental streams
-        streams.extend(
-            [HostSnapshotManager.send(n.dt, host_graph, p.dt) for n, p in zip(chain[1:], chain)])
+        producers.extend(
+            [HostSnapshotManager.get_producer(n.dt, host_graph, p.dt) for n, p in zip(chain[1:], chain)])
 
         # send those streams to local storage
-        for stream in streams:
+        for producer in producers:
+            consumers = []
             for manager, graph in ((manager0, remote_graph0), (manager1, remote_graph1)):
-                manager.subscribe(stream, graph)
-            stream.publish()
+                consumer = manager.get_consumer(producer.node, graph)
+                consumers.append(consumer)
+            stream_manager = SnapshotStreamManager(producer, consumers)
+            await stream_manager.transmit()
 
         # verify the ref is queryable now that it exists
         graph = manager0.query(dataset_id)[0]
@@ -87,9 +92,9 @@ class TestLocalFileLoopCheck(unittest.TestCase):
 
             # restore the files in order and check that the directory contains the file expected
             chain_ = remote_graph0.get_chains()[0]
-            streams = [manager.send(n, graph) for n in chain_]
-            for stream, dt in zip(streams, datetimes):
-                HostSnapshotManager.recv(stream, host_graph, zfs_args=['-F'])
+            producers = [manager.get_producer(n, graph) for n in chain_]
+            for producer, dt in zip(producers, datetimes):
+                HostSnapshotManager.recv(producer, host_graph, zfs_args=['-F'])
                 path = Path(f'/tank0/foo/{dt}.txt')
                 self.assertTrue(path.exists())
 
@@ -98,7 +103,7 @@ class TestLocalFileLoopCheck(unittest.TestCase):
             self.assertTrue(path.exists())
             path.unlink()
 
-    def test_can_use_backup_job(self):
+    async def test_can_use_backup_job(self):
         # define the backup config for each job
         directory = Path(__file__).resolve().parent
         directory = directory.joinpath('test_loop_check_files')
@@ -120,6 +125,7 @@ class TestLocalFileLoopCheck(unittest.TestCase):
         # destroy all nodes from host
         graphs = HostSnapshotManager.query('tank0/bar')
         host_graph = graphs[0] if graphs else SnapshotGraph(dataset_id='tank0/bar')
+
         [HostSnapshotManager.destroy(node, host_graph) for node in host_graph.get_nodes()]
 
         # perform a rotate and run each job
@@ -134,7 +140,7 @@ class TestLocalFileLoopCheck(unittest.TestCase):
         for dataset_id, job in config.items():
             for dt in datetimes:
                 job.rotate(dataset_id, dt=dt)
-                job.sync(dataset_id, duplicate_policy='overwrite')
+            await job.sync(dataset_id, duplicate_policy='overwrite')
 
         # verify the expected files exist
         dataset_id = 'tank0/bar'
@@ -155,15 +161,14 @@ class TestLocalFileLoopCheck(unittest.TestCase):
         self.assertEqual(backup_dts, datetimes)
 
 
-class TestDropboxLoopCheck(unittest.TestCase):
+class TestDropboxLoopCheck(unittest.IsolatedAsyncioTestCase):
 
-    def test_stream_using_pubsub(self):
+    async def test_stream_using_pubsub(self):
         """Test that ensures that data is able to be stored in chunks and restored
         using the pubsub method across moultiple managers.
         """
 
         # get an instance of the adapter
-        directory = Path(__file__).resolve().parent
         adapter = DropboxStorageAdapter(directory='/pyzync/three',
                                         key=environ.get('DROPBOX_KEY'),
                                         secret=environ.get('DROPBOX_SECRET'),
@@ -211,17 +216,22 @@ class TestDropboxLoopCheck(unittest.TestCase):
 
         # create the first complete stream
         chain = sorted(list(host_graph.get_nodes()), key=lambda node: node.dt)
-        streams = [HostSnapshotManager.send(chain[0].dt, host_graph)]
+        producers = [HostSnapshotManager.get_producer(chain[0].dt, host_graph)]
 
         # create the incremental streams
-        streams.extend(
-            [HostSnapshotManager.send(n.dt, host_graph, p.dt) for n, p in zip(chain[1:], chain)])
+        producers.extend(
+            [HostSnapshotManager.get_producer(n.dt, host_graph, p.dt) for n, p in zip(chain[1:], chain)])
 
         # send those streams to local storage
-        for stream in streams:
+        stream_managers = []
+        for producer in producers:
+            consumers = []
             for manager, graph in ((manager0, remote_graph0), (manager1, remote_graph1)):
-                manager.subscribe(stream, graph)
-            stream.publish()
+                consumer = manager.get_consumer(producer.node, graph)
+                consumers.append(consumer)
+            stream_manager = SnapshotStreamManager(producer, consumers)
+            stream_managers.append(stream_manager)
+        await asyncio.gather(*[sm.transmit() for sm in stream_managers])
 
         # verify the ref is queryable now that it exists
         graph = manager0.query(dataset_id)[0]
@@ -240,9 +250,9 @@ class TestDropboxLoopCheck(unittest.TestCase):
 
             # restore the files in order and check that the directory contains the file expected
             chain_ = remote_graph0.get_chains()[0]
-            streams = [manager.send(n, graph) for n in chain_]
-            for stream, dt in zip(streams, datetimes):
-                HostSnapshotManager.recv(stream, host_graph, zfs_args=['-F'])
+            producers = [manager.get_producer(n, graph) for n in chain_]
+            for producer, dt in zip(producers, datetimes):
+                HostSnapshotManager.recv(producer, host_graph, zfs_args=['-F'])
                 path = Path(f'/tank0/foo/{dt}.txt')
                 self.assertTrue(path.exists())
 

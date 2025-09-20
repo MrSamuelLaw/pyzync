@@ -1,7 +1,7 @@
 import unittest
 
 from pyzync.interfaces import SnapshotNode, SnapshotGraph
-from pyzync.retention_policies import LastNSnapshotsPolicy
+from pyzync.retention.policies.last_n_days import LastNSnapshotsPolicy
 
 
 class TestRetentionPolicies(unittest.TestCase):

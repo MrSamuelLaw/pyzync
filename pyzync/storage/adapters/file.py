@@ -1,0 +1,159 @@
+import re
+import logging
+from pathlib import Path, PurePath
+from typing import Optional
+
+from pydantic import BaseModel, ConfigDict, field_validator
+
+from pyzync.otel import with_tracer, trace
+from pyzync.interfaces import ZfsDatasetId, ZfsFilePath, SnapshotNode
+from pyzync.storage.interfaces import SnapshotStorageAdapter
+
+logger = logging.getLogger(__file__)
+tracer = trace.get_tracer(__file__)
+
+
+class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
+
+    model_config = ConfigDict(frozen=True)
+
+    directory: Path
+    max_file_size: Optional[int] = None
+
+    @field_validator('directory')
+    @classmethod
+    def validate_path(cls, directory: Path):
+        if not directory.is_absolute():
+            raise ValueError(f"directory must be absolute, instead received path = {directory}")
+        return directory.resolve()
+
+    def __str__(self):
+        return f"LocalFileStorageAdapter(directory={self.directory}, max_file_size={self.max_file_size})"
+
+    @with_tracer(tracer)
+    def query(self, dataset_id: Optional[ZfsDatasetId] = None):
+        logger.debug(f"[LocalFileStorageAdapter] query called with dataset_id={dataset_id}")
+        # query all the .zfs files at the root and below
+        logger.debug(f"Querying snapshot files in {self.directory} for {dataset_id}")
+        glob_pattern = "*.zfs" if dataset_id is None else f"**/{dataset_id}/*.zfs"
+        matches = {fp for fp in self.directory.rglob(glob_pattern)}
+        matches = {r.relative_to(self.directory) for r in matches}
+
+        def filt(results):
+            matches: set[ZfsFilePath] = set()
+            for r in results:
+                try:
+                    matches.add(ZfsFilePath(str(r)))
+                except ValueError:
+                    pass
+            return matches
+
+        matches = list(filt(matches))
+        return matches
+
+    @with_tracer(tracer)
+    def destroy(self, node: SnapshotNode):
+        logger.info(f"[LocalFileStorageAdapter] destroy called for node={node}")
+        filepath = node.filepath
+        base_path = self.directory.joinpath(filepath)
+        base_path = base_path.resolve()
+        directory = base_path.parent
+        stem = base_path.stem
+        suffix = base_path.suffix
+        logger.info(f"Destroying snapshot file(s) for {base_path}")
+
+        # Find all chunked files: base, _1, _2, ...
+        pattern = re.compile(rf"{re.escape(stem)}_\d+{re.escape(suffix)}")
+        filepaths = [f for f in directory.glob(f"{stem}_*{suffix}")]
+        filepaths = [f for f in filepaths if pattern.fullmatch(f.name)]
+        filepaths = sorted(filepaths, key=lambda f: int(f.stem.split('_')[-1]))
+        filepaths.insert(0, base_path)
+        for fp in filepaths:
+            fp.unlink()
+        logger.info(f"[LocalFileStorageAdapter] destroy called for node={node}")
+
+    @with_tracer(tracer)
+    def get_consumer(self, node: SnapshotNode):
+        logger.debug(f"[LocalFileStorageAdapter] subscribe called for node={node}")
+        # build a function that can handle a single chunck
+        path = self.directory.joinpath(node.filepath)
+        # create the parent dirs if they don't exist
+        if not path.parent.exists():
+            logger.debug(f"Creating parent directories {path}")
+            path.parent.mkdir(parents=True)
+
+        # define a helper function to open the file and write the stream in using context manager
+        @with_tracer(tracer)
+        def consume_bytes(path: PurePath):
+            file_size = 0
+            file_index = 0
+            cur_path = path
+            handle = None
+
+            try:
+                while True:
+                    chunk = yield
+                    if chunk is None:
+                        break
+                    elif handle is None:
+                        handle = open(cur_path, 'wb')
+
+                    # write out until out of data or at max file size, then start a new file
+                    chunk_size = len(chunk)
+                    if (self.max_file_size is not None) and ((file_size + chunk_size)
+                                                             > self.max_file_size):
+                        split_index = self.max_file_size - file_size
+                        left, right = chunk[0:split_index], chunk[split_index:]
+                        handle.write(left)
+                        handle.close()
+                        file_index += 1
+                        cur_path = path.with_name(f"{path.stem}_{file_index}{path.suffix}")
+                        handle = open(cur_path, 'wb')
+                        file_size = len(right)
+                        handle.write(right)
+                    file_size += len(chunk)
+                    handle.write(chunk)
+            except IOError as e:
+                logger.exception(f"Error writing to {cur_path}: {e}")
+                raise
+            except Exception as e:
+                logger.error(f"Error writing to {cur_path}: {e}")
+                raise
+            finally:
+                if handle:
+                    handle.close()
+
+        consumer = consume_bytes(path=path)
+        return consumer
+
+    @with_tracer(tracer)
+    def get_producer(self, node: SnapshotNode, blocksize: int = 2**20):  # default blocksize = 1MB
+        logger.debug(f"[LocalFileStorageAdapter] send called for node={node}, blocksize={blocksize}")
+        filepath = node.filepath
+        base_path = self.directory.joinpath(filepath)
+        base_path = base_path.resolve()
+        directory = base_path.parent
+        stem = base_path.stem
+        suffix = base_path.suffix
+        logger.info(f"Sending snapshot file(s) for {base_path}")
+
+        # Find all chunked files: base, _1, _2, ...
+        pattern = re.compile(rf"{re.escape(stem)}_\d+{re.escape(suffix)}")
+        filepaths = [f for f in directory.glob(f"{stem}_*{suffix}")]
+        filepaths = [f for f in filepaths if pattern.fullmatch(f.name)]
+        filepaths = sorted(filepaths, key=lambda f: int(f.stem.split('_')[-1]))
+        filepaths.insert(0, base_path)
+
+        @with_tracer(tracer)
+        def _snapshot_stream():
+            for fp in filepaths:
+                with open(fp, 'rb', buffering=blocksize) as handle:
+                    logger.debug(f"Streaming node = {node} from filepath = {fp}")
+                    while True:
+                        chunk = handle.read(blocksize)
+                        if not chunk:
+                            break
+                        yield chunk
+            logger.info(f"Successfully sent snapshot file(s) for {base_path}")
+
+        return _snapshot_stream()

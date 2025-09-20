@@ -1,13 +1,13 @@
 import unittest
 
-from pyzync.interfaces import SnapshotNode, Datetime, SnapshotGraph, SnapshotStream
+from pyzync.interfaces import SnapshotNode, Datetime, SnapshotGraph
+from pyzync.streaming import SnapshotStreamProducer
 from pyzync.host import HostSnapshotManager
 
 
 class TestHostSnapshotManager(unittest.TestCase):
 
     def test_can_manage_host_snapshots_with_dryrun(self):
-        """Tests that create, destroy, send, and recv work using dryrun"""
         # query snapshots that are related to the file system
         dataset_id = "tank0/foo"
         graph = SnapshotGraph(dataset_id=dataset_id)
@@ -30,8 +30,8 @@ class TestHostSnapshotManager(unittest.TestCase):
         self.assertEqual(node.dataset_id, dataset_id)
 
         # get the data stream object
-        stream = HostSnapshotManager.send(dt, graph, dryrun=True)
-        chunk = next(stream.bytes_stream)
+        producer = HostSnapshotManager.get_producer(dt, graph, dryrun=True)
+        chunk = next(producer.generator)
         self.assertTrue(type(chunk) is bytes, "Data is not bytes")
         self.assertGreater(len(chunk), 0)
 
@@ -42,7 +42,6 @@ class TestHostSnapshotManager(unittest.TestCase):
         self.assertFalse(graph.get_nodes())
 
     def test_can_fail_with_duplicate_create(self):
-        """Tests that attempting to create duplicate nodes raise an exception"""
         dataset_id = "tank0/foo"
         graph = SnapshotGraph(dataset_id=dataset_id)
 
@@ -55,7 +54,6 @@ class TestHostSnapshotManager(unittest.TestCase):
             HostSnapshotManager.create(dt, graph, dryrun=True)
 
     def test_can_fail_with_duplicate_destroy(self):
-        """Tests that attempting to destroy the same node twice raises an exception"""
         dataset_id = "tank0/foo"
         graph = SnapshotGraph(dataset_id=dataset_id)
         dt = "20230101T000000"
@@ -89,12 +87,12 @@ class TestHostSnapshotManager(unittest.TestCase):
         self.assertEqual(query_nodes, set(new_nodes))
 
         parent = nodes[0]
-        stream = HostSnapshotManager.send(parent.dt, graph)
-        in_mem_streams = [SnapshotStream(node=stream.node, bytes_stream=list(stream.bytes_stream))]
+        producer = HostSnapshotManager.get_producer(parent.dt, graph)
+        in_mem_streams = [SnapshotStreamProducer(node=producer.node, generator=list(producer.generator))]
         for node in nodes[1:]:
-            stream = HostSnapshotManager.send(node.dt, graph, parent.dt)
+            producer = HostSnapshotManager.get_producer(node.dt, graph, parent.dt)
             in_mem_streams.append(
-                SnapshotStream(node=stream.node, bytes_stream=list(stream.bytes_stream)))
+                SnapshotStreamProducer(node=producer.node, generator=list(producer.generator)))
             parent = node
 
         # destroy the snapshots

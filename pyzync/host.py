@@ -7,44 +7,23 @@ from textwrap import dedent
 from itertools import groupby
 from typing import Optional, Iterable, AsyncIterator
 
-from pydantic import validate_call
+from pydantic import validate_call, ConfigDict
 
 from pyzync.otel import trace, with_tracer
 from pyzync.errors import DataIntegrityError
-from pyzync.interfaces import (ZfsDatasetId, SnapshotNode, SnapshotGraph, SnapshotStream, Datetime,
-                               DATETIME_REGEX)
+from pyzync.interfaces import (ZfsDatasetId, SnapshotNode, SnapshotGraph, Datetime, DATETIME_REGEX)
+from pyzync.streaming import SnapshotStreamProducer, SnapshotStreamConsumer
 
 logger = logging.getLogger(__name__)
 tracer = trace.get_tracer(__name__)
 
 
 class HostSnapshotManager:
-    """
-    Manages ZFS snapshots on the host system.
-
-    Provides functionality for creating, querying, destroying, and sending both complete
-    and incremental snapshots using ZFS commands.
-    """
 
     @staticmethod
     @with_tracer(tracer)
-    @validate_call
+    @validate_call(config=ConfigDict(arbitrary_types_allowed=True))
     def create(dt: Datetime, graph: SnapshotGraph, dryrun: bool = False):
-        """
-        Create a snapshot for the given dataset at the specified datetime.
-
-        Args:
-            dt (Datetime): The datetime for the snapshot.
-            graph (SnapshotGraph): The snapshot graph to update.
-            dryrun (bool, optional): If True, do not perform actual operations. Defaults to False.
-
-        Returns:
-            SnapshotNode: The created snapshot node.
-
-        Raises:
-            subprocess.CalledProcessError: If the ZFS snapshot command fails.
-            Exception: For other errors during snapshot creation.
-        """
         logger.info(f"Creating snapshot for {graph.dataset_id} on {dt}.")
         try:
             node = SnapshotNode(dataset_id=graph.dataset_id, dt=dt)
@@ -64,21 +43,8 @@ class HostSnapshotManager:
 
     @staticmethod
     @with_tracer(tracer)
-    @validate_call
+    @validate_call(config=ConfigDict(arbitrary_types_allowed=True))
     def query(dataset_id: Optional[ZfsDatasetId] = None):
-        """
-        Query all snapshots for a given dataset or all datasets.
-
-        Args:
-            dataset_id (Optional[ZfsDatasetId], optional): The dataset to query. Defaults to None.
-
-        Returns:
-            list[SnapshotGraph]: List of snapshot graphs for each dataset.
-
-        Raises:
-            subprocess.CalledProcessError: If the ZFS list or grep command fails.
-            Exception: For other errors during query.
-        """
         logger.debug(f"Querying SnapshotNodes for {dataset_id}")
 
         try:
@@ -117,20 +83,8 @@ class HostSnapshotManager:
 
     @staticmethod
     @with_tracer(tracer)
-    @validate_call
+    @validate_call(config=ConfigDict(arbitrary_types_allowed=True))
     def destroy(node: SnapshotNode, graph: SnapshotGraph, dryrun: bool = False):
-        """
-        Destroy a snapshot node from the graph and the ZFS system.
-
-        Args:
-            node (SnapshotNode): The snapshot node to destroy.
-            graph (SnapshotGraph): The snapshot graph to update.
-            dryrun (bool, optional): If True, do not perform actual operations. Defaults to False.
-
-        Raises:
-            subprocess.CalledProcessError: If the ZFS destroy command fails.
-            Exception: For other errors during destroy.
-        """
         logger.info(f"Destroying snapshot for snapshot {node.snapshot_id} with dryrun = {dryrun}")
         try:
             graph.remove(node)
@@ -148,34 +102,14 @@ class HostSnapshotManager:
 
     @staticmethod
     @with_tracer(tracer)
-    @validate_call
-    def send(
+    @validate_call(config=ConfigDict(arbitrary_types_allowed=True))
+    def get_producer(
             dt: Datetime,
             graph: SnapshotGraph,
             parent_dt: Optional[Datetime] = None,
             zfs_args: list[str] = [],
             buffer_length: int = 100 * (2**20),  # 100 MB
-            dryrun: bool = False):
-        """
-        Send a snapshot or incremental snapshot as a stream.
-
-        Args:
-            dt (Datetime): The datetime of the snapshot to send.
-            graph (SnapshotGraph): The snapshot graph.
-            parent_dt (Optional[Datetime], optional): The parent snapshot datetime for incremental. Defaults to None.
-            zfs_args (list[str], optional): Additional ZFS arguments. Defaults to [].
-            buffer_size (int, optional): Block size for streaming. Defaults to 100 MB.
-            dryrun (bool, optional): If True, do not perform actual operations. Defaults to False.
-
-        Returns:
-            SnapshotStream: The snapshot stream object.
-
-        Raises:
-            DataIntegrityError: If parent_dt is not less than dt.
-            ValueError: If the graph does not contain the required nodes.
-            subprocess.CalledProcessError: If the ZFS send command fails.
-            Exception: For other errors during send.
-        """
+            dryrun: bool = False) -> SnapshotStreamProducer:
         if (parent_dt is not None) and (parent_dt >= dt):
             raise DataIntegrityError(
                 dedent("""
@@ -195,7 +129,7 @@ class HostSnapshotManager:
             # update the node definition if the parent exists
             node = SnapshotNode(dt=node.dt, parent_dt=parent_dt, dataset_id=node.dataset_id)
 
-        def _iterator():
+        def _generator():
             try:
                 # build the command
                 cmd = ["zfs", "send", *zfs_args]
@@ -228,45 +162,32 @@ class HostSnapshotManager:
                 raise
 
         if dryrun:
-            iterator = (bytes(b) for b in b'somebytes')
+            generator = (bytes([b]) for b in b'0')
         else:
-            iterator: Iterable[bytes] = _iterator()
-        stream = SnapshotStream(
+            generator: Iterable[bytes] = _generator()
+        producer = SnapshotStreamProducer(
             node=node,
-            bytes_stream=iterator,
+            generator=generator,
         )
-        return stream
+        return producer
 
     @staticmethod
     @with_tracer(tracer)
-    @validate_call
-    def recv(stream: SnapshotStream,
+    @validate_call(config=ConfigDict(arbitrary_types_allowed=True))
+    def recv(producer: SnapshotStreamProducer,
              graph: SnapshotGraph,
              zfs_args: list[str] = [],
              dryrun: bool = False):
-        """
-        Receive a snapshot stream and add it to the graph and ZFS system.
-
-        Args:
-            stream (SnapshotStream): The snapshot stream to receive.
-            graph (SnapshotGraph): The snapshot graph to update.
-            zfs_args (list[str], optional): Additional ZFS arguments. Defaults to [].
-            dryrun (bool, optional): If True, do not perform actual operations. Defaults to False.
-
-        Raises:
-            subprocess.CalledProcessError: If the ZFS recv command fails.
-            Exception: For other errors during receive.
-        """
-        logger.info(f"Receiving snapshot stream for {stream}")
+        logger.info(f"Receiving snapshot stream for {producer}")
         # make sure to recieve as a non-incremental node into the graph
-        if stream.node.node_type == 'complete':
-            graph.add(stream.node)
+        if producer.node.node_type == 'complete':
+            graph.add(producer.node)
         else:
-            data = stream.node.model_dump()
+            data = producer.node.model_dump()
             del data['parent_dt']
             graph.add(SnapshotNode(**data))
         # Use only the dataset name for zfs recv target
-        cmd = ["zfs", "recv", *zfs_args, stream.node.dataset_id]
+        cmd = ["zfs", "recv", *zfs_args, producer.node.dataset_id]
         if not dryrun:
             try:
                 with subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -277,7 +198,7 @@ class HostSnapshotManager:
                         raise RuntimeError("Failed to open stdin for the subprocess")
 
                     # write the data
-                    for chunk in stream.bytes_stream:
+                    for chunk in producer.generator:
                         process.stdin.write(chunk)
 
                     # flush and close the buffer
@@ -287,9 +208,11 @@ class HostSnapshotManager:
                     # wait for the process to complete
                     returncode = process.wait(1)
                     if returncode:
-                        error = process.stderr.read()
+                        error = b''
+                        if process.stderr:
+                            error += process.stderr.read()
                         raise subprocess.CalledProcessError(returncode, cmd, stderr=error)
             except subprocess.CalledProcessError as e:
-                logger.exception(f"Failed to receive snapshot stream for {stream}")
+                logger.exception(f"Failed to receive snapshot stream for {producer}")
                 print(e.stderr, file=sys.stderr)
                 raise

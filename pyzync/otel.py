@@ -17,7 +17,6 @@ from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
 
 
 class JsonlConsoleSpanExporter(ConsoleSpanExporter):
-    """Class for exporting jsonl spans from the app for debugging purposes"""
 
     def __init__(self, out: IO = stdout):
         self.out = out
@@ -58,7 +57,6 @@ if _TRACE_EXPORTERS_SET is False:
 
 
 class JsonlConsoleLogExporter(ConsoleLogExporter):
-    """Class for exporting jsonl logs from the app for debuggin purposes"""
 
     def __init__(self, out: IO = stdout):
         self.out = out
