@@ -11,7 +11,7 @@ from pyzync.interfaces import SnapshotGraph, Datetime
 from pyzync.storage.interfaces import RemoteSnapshotManager
 from pyzync.storage.adapters.file import LocalFileStorageAdapter
 from pyzync.storage.adapters.dropbox import DropboxStorageAdapter
-from pyzync.retention.policies.last_n_days import LastNSnapshotsPolicy
+from pyzync.retention.policies.last_n import LastNSnapshotsPolicy
 
 
 class TestLocalFileLoopCheck(unittest.IsolatedAsyncioTestCase):

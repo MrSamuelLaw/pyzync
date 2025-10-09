@@ -1,26 +1,25 @@
 import os
 import re
-import logging
+import time
+import random
 from io import BytesIO
 from pathlib import PurePath
-from typing import Optional, cast
+from typing import Callable, Any, Optional, cast
 
+import humanize
 from dropbox import dropbox_client
-from dropbox import exceptions as dbx_exceptions
 from dropbox import files as dbx_files
+from dropbox import exceptions as dbx_exceptions
 from requests.models import Response
+from requests.exceptions import RequestException
 from pydantic import BaseModel, field_validator, SecretStr, ConfigDict
 
+from pyzync import logging
 from pyzync.storage.interfaces import SnapshotStorageAdapter
 from pyzync.otel import trace, with_tracer
 from pyzync.interfaces import ZfsDatasetId, ZfsFilePath, SnapshotNode
 
-# Configure Dropbox SDK logging to only show warnings when level = INFO as info is closer to debug.
-logger = logging.getLogger('dropbox')
-LOG_LEVEL = getattr(logging, os.environ.get('LOG_LEVEL', 'INFO'))
-if LOG_LEVEL == logging.INFO:
-    logger.setLevel(logging.WARNING)
-
+logger = logging.get_logger('dropbox')
 tracer = trace.get_tracer('dropbox')
 
 
@@ -34,9 +33,15 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
     refresh_token: Optional[SecretStr] = None
     access_token: Optional[SecretStr] = None
     max_file_size: int = 350 * (2**30)  # 350 GB
+    
+    # Retry/backoff configuration to tolerate transient network/timeouts
+    max_retries: int = 5
+    backoff_base: float = 0.5  # base seconds for exponential backoff
+    backoff_max: float = 30.0  # max seconds to sleep between retries
+    backoff_jitter: float = 0.1  # relative jitter (10%) added/subtracted
 
     def __str__(self):
-        return f"DropboxStorageAdapter(directory={self.directory}, max_file_size={self.max_file_size})"
+        return f"DropboxStorageAdapter(directory={self.directory})"
 
     @field_validator('directory')
     @classmethod
@@ -59,12 +64,44 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
             return dropbox_client.Dropbox(access_token)
         else:
             raise RuntimeError(
-                "Dropbox credentials not found. Set DROPBOX_REFRESH_TOKEN, DROPBOX_KEY, DROPBOX_SECRET or DROPBOX_TOKEN in your environment."
+                "Dropbox credentials not found. Set DROPBOX_REFRESH_TOKEN, DROPBOX_KEY,"
+                "DROPBOX_SECRET or DROPBOX_TOKEN in your environment."
             )
+
+    def _retry_call(self, fn: Callable[..., Any], *args, **kwargs) -> Any:
+        """Retry a Dropbox SDK call with exponential backoff and jitter for transient errors.
+
+        Treats network-related exceptions and Dropbox Api/Http errors as retriable.
+        """
+        attempt = 0
+        while True:
+            try:
+                return fn(*args, **kwargs)
+            except Exception as e:  # noqa: BLE001 - broad catch for retry policy
+                attempt += 1
+                # Consider these exceptions transient/retriable
+                is_transient = isinstance(e, (
+                    dbx_exceptions.ApiError,
+                    dbx_exceptions.HttpError,
+                    RequestException,
+                ))
+                # If we've exhausted retries or the error is clearly not transient, re-raise
+                if attempt >= (self.max_retries or 1) or not is_transient:
+                    logger.exception("Dropbox API call failed and will not be retried")
+                    raise
+                # Exponential backoff with jitter
+                sleep = min(self.backoff_max, self.backoff_base * (2**(attempt - 1)))
+                jitter = sleep * self.backoff_jitter
+                sleep = max(0.0, sleep + random.uniform(-jitter, jitter))
+                logger.exception(
+                    f"Transient Dropbox error (attempt {attempt}/{self.max_retries}), retrying in {sleep:.1f}s.",
+                )
+                time.sleep(sleep)
 
     @with_tracer(tracer)
     def query(self, dataset_id: Optional[ZfsDatasetId] = None):
-        logger.debug(f"[DropboxStorageAdapter] query called with dataset_id={dataset_id}")
+        lgr = logger.bind(dataset_id=dataset_id, directory=self.directory)
+        lgr.debug("Querying snapshots")
         dbx = self._client()
         # Build the path to list
         if dataset_id is None:
@@ -74,12 +111,14 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
         # Recursively list all .zfs files
         def list_files(folder: str):
             try:
-                res = cast(dbx_files.ListFolderResult, dbx.files_list_folder(folder, recursive=True))
+                res = cast(dbx_files.ListFolderResult,
+                           self._retry_call(dbx.files_list_folder, folder, recursive=True))
             except dbx_exceptions.ApiError:
                 return []
             entries = res.entries
             while res.has_more:
-                res = cast(dbx_files.ListFolderResult, dbx.files_list_folder_continue(res.cursor))
+                res = cast(dbx_files.ListFolderResult,
+                           self._retry_call(dbx.files_list_folder_continue, res.cursor))
                 entries.extend(res.entries)
             return [e for e in entries if isinstance(e, dbx_files.FileMetadata)]
 
@@ -98,7 +137,8 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
 
     @with_tracer(tracer)
     def destroy(self, node: SnapshotNode):
-        logger.debug(f"[DropboxStorageAdapter] destroy called for node={node}")
+        lgr = logger.bind(node=node, directory=self.directory)
+        lgr.info("Destroying snapshot")
         dbx = self._client()
         base_path = self.directory.joinpath(node.filepath)
         directory = base_path.parent
@@ -108,12 +148,14 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
         # List all files in the directory on Dropbox
         def list_files(folder):
             try:
-                res = cast(dbx_files.ListFolderResult, dbx.files_list_folder(str(folder)))
+                res = cast(dbx_files.ListFolderResult,
+                           self._retry_call(dbx.files_list_folder, str(folder)))
             except dbx_exceptions.ApiError:
                 return []
             entries = res.entries
             while res.has_more:
-                res = cast(dbx_files.ListFolderResult, dbx.files_list_folder_continue(res.cursor))
+                res = cast(dbx_files.ListFolderResult,
+                           self._retry_call(dbx.files_list_folder_continue, res.cursor))
                 entries.extend(res.entries)
             return [PurePath(e.path_display) for e in entries if isinstance(e, dbx_files.FileMetadata)]
 
@@ -123,20 +165,21 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
         filepaths = [f for f in filepaths if pattern.fullmatch(f.name)]
         filepaths = sorted(filepaths, key=lambda f: int(f.stem.split('_')[-1]))
         filepaths.insert(0, base_path)
-        for f in filepaths:
+        for fp in filepaths:
             try:
-                dbx.files_delete_v2(str(f))
+                self._retry_call(dbx.files_delete_v2, str(fp))
             except dbx_exceptions.ApiError:
-                logger.warning(f"Dropbox file could not be destroyed: {f}")
-        logger.info(f"Successfully destroyed all files for {base_path}")
+                lgr.warning("Dropbox file could not be destroyed", path=fp)
 
     @with_tracer(tracer)
     def get_consumer(self, node: SnapshotNode):
+        lgr = logger.bind(node=node)
+        lgr.debug("Getting consumer")
+        
         path = self.directory.joinpath(node.filepath)
-        logger.debug(f"[DropboxStorageAdapter] subscribe called for stream.node={node}")
-
+        
         MODULO = 4 * (2**20)  # 4MB
-        MAX_SIZE = 144 * (2**20)  # 144 MB
+        MAX_BUFFER_SIZE = 144 * (2**20)  # 144 MB
 
         @with_tracer(tracer)
         def consume_bytes(path: PurePath):
@@ -147,16 +190,19 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
             buffer = b''
             dbx = None
             try:
+                nonlocal lgr
+                lgr = lgr.bind(path=path)
+                lgr.debug("Starting dropbox consumer generator")
                 while True:
                     # once the iterator is primed it starts here
                     chunk = yield
                     if chunk is None:
-                        logger.info(f'[DropboxStorageAdapter] stopping consumer for {self}')
+                        lgr.debug('Shutting down consumer generator')
                         break
                     if session_id is None or dbx is None:
                         dbx = self._client()
                         result = cast(dbx_files.UploadSessionStartResult,
-                                      dbx.files_upload_session_start(b''))
+                                      self._retry_call(dbx.files_upload_session_start, b''))
                         session_id = result.session_id
                         file_size = 0
 
@@ -165,47 +211,52 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
                                                              > self.max_file_size):
                         split_index = self.max_file_size - file_size
                         left, right = buffer[0:split_index], buffer[split_index:]
-                        dbx.files_upload_session_finish(
-                            left, dbx_files.UploadSessionCursor(session_id, file_size),
+                        self._retry_call(
+                            dbx.files_upload_session_finish, left,
+                            dbx_files.UploadSessionCursor(session_id, file_size),
                             dbx_files.CommitInfo(str(cur_path), mode=dbx_files.WriteMode.overwrite))
                         buffer = right
                         file_index += 1
                         cur_path = path.with_name(f"{path.stem}_{file_index}{path.suffix}")
+                        lgr = lgr.bind(path=cur_path)
+                        lgr.debug("Sharding to next file")
                         result = cast(dbx_files.UploadSessionStartResult,
-                                      dbx.files_upload_session_start(b''))
+                                      self._retry_call(dbx.files_upload_session_start, b''))
                         session_id = result.session_id
                         file_size = 0
                     else:
                         while len(buffer) >= MODULO:
                             # Calculate largest slice that's divisible by MODULO and less than MAX_SIZE
-                            slice_size = min(len(buffer) - (len(buffer) % MODULO), MAX_SIZE)
+                            slice_size = min(len(buffer) - (len(buffer) % MODULO), MAX_BUFFER_SIZE)
                             data, buffer = buffer[:slice_size], buffer[slice_size:]
                             # perform the upload
-                            dbx.files_upload_session_append_v2(
-                                data, dbx_files.UploadSessionCursor(session_id, file_size))
+                            self._retry_call(dbx.files_upload_session_append_v2, data,
+                                             dbx_files.UploadSessionCursor(session_id, file_size))
                             file_size += len(data)
                 if buffer and session_id and dbx:
                     while len(buffer) >= MODULO:
                         # Calculate largest slice that's divisible by MODULO and less than MAX_SIZE
-                        slice_size = min(len(buffer) - (len(buffer) % MODULO), MAX_SIZE)
+                        slice_size = min(len(buffer) - (len(buffer) % MODULO), MAX_BUFFER_SIZE)
                         data, buffer = buffer[:slice_size], buffer[slice_size:]
                         # perform the upload
-                        dbx.files_upload_session_append_v2(
-                            data, dbx_files.UploadSessionCursor(session_id, file_size))
+                        self._retry_call(dbx.files_upload_session_append_v2, data,
+                                         dbx_files.UploadSessionCursor(session_id, file_size))
                         file_size += len(data)
-                    dbx.files_upload_session_finish(
-                        buffer, dbx_files.UploadSessionCursor(session_id, file_size),
+                    self._retry_call(
+                        dbx.files_upload_session_finish, buffer,
+                        dbx_files.UploadSessionCursor(session_id, file_size),
                         dbx_files.CommitInfo(str(cur_path), mode=dbx_files.WriteMode.overwrite))
             except:
-                logger.exception('Failed to consume bytes for dropbox remote')
+                lgr.exception('Error consuming bytes')
                 raise
 
         consumer = consume_bytes(path=path)
         return consumer
 
     @with_tracer(tracer)
-    def get_producer(self, node: SnapshotNode, blocksize: int = 2**20):
-        logger.debug(f"[DropboxStorageAdapter] send called for node={node}, blocksize={blocksize}")
+    def get_producer(self, node: SnapshotNode, bufsize: int = 2**20):  # default 1 MB
+        lgr = logger.bind(node=node, bufsize=humanize.naturalsize(bufsize))
+        lgr.debug("Getting producer")
         dbx = self._client()
         base_path = self.directory.joinpath(node.filepath)
         directory = base_path.parent
@@ -216,12 +267,13 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
 
         def list_files(folder):
             try:
-                res = cast(dbx_files.ListFolderResult, dbx.files_list_folder(folder))
+                res = cast(dbx_files.ListFolderResult, self._retry_call(dbx.files_list_folder, folder))
             except dbx_exceptions.ApiError:
                 return []
             entries = res.entries
             while res.has_more:
-                res = cast(dbx_files.ListFolderResult, dbx.files_list_folder_continue(res.cursor))
+                res = cast(dbx_files.ListFolderResult,
+                           self._retry_call(dbx.files_list_folder_continue, res.cursor))
                 entries.extend(res.entries)
             return [e for e in entries if isinstance(e, dbx_files.FileMetadata)]
 
@@ -233,16 +285,17 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
         filepaths.insert(0, base_path)
 
         def _producer():
-            for f in filepaths:
+            for fp in filepaths:
                 # f may be a Dropbox FileMetadata or a PurePath, handle both
-                path_str = str(f)
-                _, res = cast(tuple[dbx_files.FileMetadata, Response], dbx.files_download(path_str))
+                path_str = str(fp)
+                lgr.debug("Streaming data from file", path=fp)
+                _, res = cast(tuple[dbx_files.FileMetadata, Response],
+                              self._retry_call(dbx.files_download, path_str))
                 buf = BytesIO(res.content)
                 while True:
-                    chunk = buf.read(blocksize)
+                    chunk = buf.read(bufsize)
                     if not chunk:
                         break
                     yield chunk
-            logger.info(f"Successfully sent snapshot file(s) for {base_path}")
 
         return _producer()

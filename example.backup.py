@@ -1,11 +1,14 @@
 import sys
-import dotenv
 import logging
+import asyncio
 from os import environ
 
-from pyzync.backup import BackupJob, BackupJob
-from pyzync.retention_policies import LastNSnapshotsPolicy
-from pyzync.storage_adapters import LocalFileStorageAdapter, DropboxStorageAdapter
+import dotenv
+
+from pyzync.backup import BackupJob
+from pyzync.retention.policies.last_n import LastNSnapshotsPolicy
+from pyzync.storage.adapters.file import LocalFileStorageAdapter
+from pyzync.storage.adapters.dropbox import DropboxStorageAdapter
 
 # setup the default logging
 root_logger = logging.getLogger()
@@ -26,19 +29,24 @@ root_logger.addHandler(stderr_handler)
 # loads enviroment variables from .env file
 dotenv.load_dotenv()
 
-# define the backup config for each job
-backup_config = {
-    'tank1/foo':
-        BackupJob(
-            retention_policy=LastNSnapshotsPolicy(n_snapshots=5),
-            adapters=[
-                LocalFileStorageAdapter(directory=environ['BACKUP_DIR']),
-                  DropboxStorageAdapter(directory=environ['DROPBOX_DIR'],
-                                        access_token=environ['DROPBOX_TOKEN'])
-            ])
-}
 
-# perform a rotate and run each job
-for dataset_id, job in backup_config.items():
-    job.rotate(dataset_id)
-    job.sync(dataset_id)
+# define the backup config for each job
+async def main():
+    backup_config = {
+        'tank1/foo':
+            BackupJob(retention_policy=LastNSnapshotsPolicy(n_snapshots=5),
+                      adapters=[
+                          LocalFileStorageAdapter(directory=environ['BACKUP_DIR']),
+                          DropboxStorageAdapter(directory=environ['DROPBOX_DIR'],
+                                                access_token=environ['DROPBOX_TOKEN'])
+                      ])
+    }
+
+    # perform a rotate and run each job
+    for dataset_id, job in backup_config.items():
+        job.rotate(dataset_id)
+        await job.sync(dataset_id)
+
+
+if __name__ == '__main__':
+    asyncio.run(main())

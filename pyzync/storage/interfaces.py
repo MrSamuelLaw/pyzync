@@ -1,17 +1,18 @@
-import logging
 from abc import ABC, abstractmethod
 from typing import Optional, Iterable, Sequence
 from itertools import groupby
 
+import humanize
 from pydantic import BaseModel, ConfigDict
 
+from pyzync import logging
 from pyzync.errors import DataIntegrityError
 from pyzync.streaming import SnapshotStreamProducer, SnapshotStreamConsumer, BytesConsumer
 from pyzync.interfaces import (DuplicateDetectedPolicy, ZfsDatasetId, ZfsFilePath, SnapshotNode,
                                SnapshotGraph)
 from pyzync.otel import trace, with_tracer
 
-logger = logging.getLogger(__name__)
+logger = logging.get_logger(__name__)
 tracer = trace.get_tracer(__name__)
 
 
@@ -26,7 +27,7 @@ class SnapshotStorageAdapter(ABC):
         pass
 
     @abstractmethod
-    def get_producer(self, node: SnapshotNode, blocksize: int = 4096) -> Iterable[bytes]:
+    def get_producer(self, node: SnapshotNode, bufsize: int = 4096) -> Iterable[bytes]:
         pass
 
     @abstractmethod
@@ -45,10 +46,8 @@ class RemoteSnapshotManager(BaseModel):
 
     @with_tracer(tracer)
     def query(self, dataset_id: Optional[ZfsDatasetId] = None):
-        logger.info(
-            "[RemoteStorageAdapter] query called for " \
-            f"adapter={self.adapter} with dataset_id={dataset_id}"
-        )
+        l = logger.bind(dataset_id=dataset_id, adapter=self.adapter)
+        l.debug("Querying snapshots")
         files = self.adapter.query(dataset_id)
         nodes = [SnapshotNode.from_zfs_filepath(f) for f in files]
         nodes = sorted(nodes, key=lambda n: n.dataset_id)  # sort so the groupby works
@@ -57,8 +56,6 @@ class RemoteSnapshotManager(BaseModel):
             graph = SnapshotGraph(dataset_id=dataset_id)
             [graph.add(node) for node in group]
             graphs.append(graph)
-        logger.info(f"[RemoteStorageAdapter] query for adapter={self.adapter} " \
-                    f"with dataset_id={dataset_id} returned {len(graphs)} graphs")
         return graphs
 
     @with_tracer(tracer)
@@ -68,7 +65,8 @@ class RemoteSnapshotManager(BaseModel):
                 dryrun: bool = False,
                 prune: bool = False,
                 force: bool = False):
-        logger.info(f"[RemoteStorageAdapter] destroy called for adapter={self.adapter} with node={node}")
+        l = logger.bind(node=node, dryrun=dryrun, prune=prune, force=force)
+        l.info("Destroying snapshot")
         # if there is only one chain, prevent the user from deleting anything but the last link
         chains = graph.get_chains()
         if (len(chains) == 1) and (node != chains[0][-1]) and (not force):
@@ -77,7 +75,6 @@ class RemoteSnapshotManager(BaseModel):
         # remove the node
         graph.remove(node)
         if not dryrun:
-            logger.debug(f'Destroying node = {node}')
             self.adapter.destroy(node)
         # prune if needed
         if prune:
@@ -85,30 +82,31 @@ class RemoteSnapshotManager(BaseModel):
             for node in orphans:
                 graph.remove(node)
                 if not dryrun:
-                    logger.debug(f'Destroying node = {node}')
+                    l.debug(f'Destroying orphaned node', node=node)
                     self.adapter.destroy(node)
-        logger.info(
-            f"[RemoteStorageAdapter] Successfully destroyed called for adapter={self.adapter} with node={node}"
-        )
 
     @with_tracer(tracer)
     def get_producer(self,
                      node: SnapshotNode,
                      graph: SnapshotGraph,
-                     blocksize: int = 4096,
+                     bufsize: int = 100 * (2**20),  # 100 MD
                      dryrun: bool = False):
-        logger.info(f"[RemoteStorageAdapter] Send called for adapter={self.adapter} with node={node}")
+        l = logger.bind(node=node, bufsize=humanize.naturalsize(bufsize), dryrun=dryrun, adapter=self.adapter)
+        l.info("Getting producer")
         if node not in graph.get_nodes():
             raise ValueError(f'Node = {node} not part of graph = {graph}')
         if dryrun:
-            stream = SnapshotStreamProducer(node=node, generator=(b'0',))
+            stream = SnapshotStreamProducer(
+                node=node, generator=(b'0',)
+            )
         else:
-            stream = SnapshotStreamProducer(node=node,
-                                            generator=self.adapter.get_producer(node,
-                                                                                blocksize=blocksize))
-        logger.info(
-            f"[RemoteStorageAdapter] Stream successfully built for adapter={self.adapter} with node={node}"
-        )
+            stream = SnapshotStreamProducer(
+                node=node,
+                generator=self.adapter.get_producer(
+                    node,
+                    bufsize=bufsize
+                )
+            )
         return stream
 
     @with_tracer(tracer)
@@ -118,8 +116,8 @@ class RemoteSnapshotManager(BaseModel):
             graph: SnapshotGraph,
             dryrun: bool = False,
             duplicate_policy: DuplicateDetectedPolicy = 'error') -> Optional[SnapshotStreamConsumer]:
-        logger.info(
-            f"[RemoteStorageAdapter] getting consumer for adapter={self.adapter} and node={node}")
+        l = logger.bind(node=node, dryrun=dryrun, duplicate_policy=duplicate_policy)
+        l.info("Getting consumer")
         is_duplicate = node in graph.get_nodes()
         if not is_duplicate:
             graph.add(node)
@@ -128,6 +126,3 @@ class RemoteSnapshotManager(BaseModel):
                 f'Cannot get consumer for duplicate node = {node} for adapter = {self.adapter}')
         if not dryrun:
             return SnapshotStreamConsumer(node=node, generator=self.adapter.get_consumer(node))
-        logger.info(
-            f"[RemoteStorageAdapter] Successfully got consumer for adapter={self.adapter} and node={node}"
-        )

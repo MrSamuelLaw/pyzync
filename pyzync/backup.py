@@ -66,7 +66,7 @@ class BackupJob(BaseModel):
 
         # send the streams to the remote if they are not already on the remote
         producers = [
-            HostSnapshotManager.get_producer(chain[0].dt, host_graph, buffer_length=self.buffer_length)
+            HostSnapshotManager.get_producer(chain[0].dt, host_graph, bufsize=self.buffer_length)
         ]
         producers.extend([
             HostSnapshotManager.get_producer(node.dt, host_graph, parent.dt)

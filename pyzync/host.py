@@ -1,20 +1,19 @@
-import sys
-import asyncio
 import subprocess
-import logging
 from functools import partial
 from textwrap import dedent
 from itertools import groupby
-from typing import Optional, Iterable, AsyncIterator
+from typing import Optional, Iterable
 
+import humanize
 from pydantic import validate_call, ConfigDict
 
+from pyzync import logging
 from pyzync.otel import trace, with_tracer
 from pyzync.errors import DataIntegrityError
 from pyzync.interfaces import (ZfsDatasetId, SnapshotNode, SnapshotGraph, Datetime, DATETIME_REGEX)
-from pyzync.streaming import SnapshotStreamProducer, SnapshotStreamConsumer
+from pyzync.streaming import SnapshotStreamProducer
 
-logger = logging.getLogger(__name__)
+logger = logging.get_logger(__name__)
 tracer = trace.get_tracer(__name__)
 
 
@@ -24,7 +23,8 @@ class HostSnapshotManager:
     @with_tracer(tracer)
     @validate_call(config=ConfigDict(arbitrary_types_allowed=True))
     def create(dt: Datetime, graph: SnapshotGraph, dryrun: bool = False):
-        logger.info(f"Creating snapshot for {graph.dataset_id} on {dt}.")
+        lgr = logger.bind(dataset_id=graph.dataset_id, dt=dt, dryrun=dryrun)
+        lgr.info("Creating a host snapshot",)
         try:
             node = SnapshotNode(dataset_id=graph.dataset_id, dt=dt)
             graph.add(node)
@@ -36,16 +36,16 @@ class HostSnapshotManager:
                     check=True,
                 )
             return node
-        except subprocess.CalledProcessError as e:
-            logger.exception(f"Failed to create snapshot for {graph.dataset_id} on {dt}")
-            print(e.stderr, file=sys.stderr)
+        except subprocess.CalledProcessError:
+            lgr.exception("Failed to create snapshot")
             raise
 
     @staticmethod
     @with_tracer(tracer)
     @validate_call(config=ConfigDict(arbitrary_types_allowed=True))
     def query(dataset_id: Optional[ZfsDatasetId] = None):
-        logger.debug(f"Querying SnapshotNodes for {dataset_id}")
+        lgr = logger.bind(dataset_id=dataset_id)
+        lgr.debug("Querying host snapshots")
 
         try:
             if dataset_id is None:
@@ -73,19 +73,19 @@ class HostSnapshotManager:
             # returncode == -1 indicates grep didn't find any matches
             if (e.stderr.strip() == "no datasets available") or (e.returncode == 1):
                 if dataset_id is None:
-                    result: list[SnapshotGraph] = []
+                    graphs: list[SnapshotGraph] = []
                 else:
-                    result = [SnapshotGraph(dataset_id=dataset_id)]
-                return result
-            logger.exception(f"Failed to query snapshots for {dataset_id}")
-            print(e.stderr, file=sys.stderr)
+                    graphs = [SnapshotGraph(dataset_id=dataset_id)]
+                return graphs
+            lgr.exception("Failed to query snapshots")
             raise
 
     @staticmethod
     @with_tracer(tracer)
     @validate_call(config=ConfigDict(arbitrary_types_allowed=True))
     def destroy(node: SnapshotNode, graph: SnapshotGraph, dryrun: bool = False):
-        logger.info(f"Destroying snapshot for snapshot {node.snapshot_id} with dryrun = {dryrun}")
+        lgr = logger.bind(snapshot_id=node.snapshot_id, dryrun=dryrun)
+        lgr.info("Destroying snapshot")
         try:
             graph.remove(node)
             if not dryrun:
@@ -95,9 +95,8 @@ class HostSnapshotManager:
                     text=True,
                     check=True,
                 )
-        except subprocess.CalledProcessError as e:
-            logger.exception(f"Failed to destroy snapshot {node.snapshot_id}")
-            print(e.stderr, file=sys.stderr)
+        except subprocess.CalledProcessError:
+            lgr.exception("Failed to destroy snapshot!")
             raise
 
     @staticmethod
@@ -108,8 +107,18 @@ class HostSnapshotManager:
             graph: SnapshotGraph,
             parent_dt: Optional[Datetime] = None,
             zfs_args: list[str] = [],
-            buffer_length: int = 100 * (2**20),  # 100 MB
+            bufsize: int = 100 * (2**20),  # 100 MB
             dryrun: bool = False) -> SnapshotStreamProducer:
+        # setup the logger
+        lgr = logger.bind(dataset_id=graph.dataset_id,
+                        dt=dt,
+                        parent_dt=parent_dt,
+                        dryrun=dryrun,
+                        zfs_args=zfs_args,
+                        bufsize=humanize.naturalsize(bufsize))
+
+        lgr.info("Getting producer")
+
         if (parent_dt is not None) and (parent_dt >= dt):
             raise DataIntegrityError(
                 dedent("""
@@ -137,28 +146,31 @@ class HostSnapshotManager:
                     # note we only pass the part after the @ to avoid mixing datasets by accident
                     cmd.extend(["-i", str(node.parent_dt)])
                 cmd.append(node.snapshot_id)
-
+                lgr = logger.bind(zfs_cmd=cmd)
+                lgr.debug("Starting host producer generator")
                 # using a context manager, build an unbuffered generator to stream the data
                 with subprocess.Popen(cmd,
                                       stdout=subprocess.PIPE,
                                       stderr=subprocess.PIPE,
-                                      bufsize=buffer_length) as process:
+                                      bufsize=bufsize) as process:
                     # check to make sure the pipe is open
                     if process.stdout is None:
                         raise RuntimeError("Failed to open stdout for the subprocess")
 
                     # iterate over the binary data
-                    for block in iter(partial(process.stdout.read, buffer_length), b""):
+                    for block in iter(partial(process.stdout.read, bufsize), b""):
                         yield block
 
                     # check for non-zero return code
                     returncode = process.wait(1)
                     if returncode:
-                        error = process.stderr.read()
+                        if process.stderr is not None:
+                            error = process.stderr.read()
+                        else:
+                            error = 'stderr not available...'
                         raise subprocess.CalledProcessError(returncode, cmd, stderr=error)
-            except subprocess.CalledProcessError as e:
-                logger.exception(f"Failed to send snapshot using cmd = {cmd}")
-                print(e.stderr, file=sys.stderr)
+            except subprocess.CalledProcessError:
+                lgr.exception("Failed to send snapshot") # pyright: ignore[reportPossiblyUnboundVariable]
                 raise
 
         if dryrun:
@@ -178,7 +190,8 @@ class HostSnapshotManager:
              graph: SnapshotGraph,
              zfs_args: list[str] = [],
              dryrun: bool = False):
-        logger.info(f"Receiving snapshot stream for {producer}")
+        lgr = logger.bind(producer=producer, zfs_args=zfs_args, dryrun=dryrun)
+        lgr.info("Receiving snapshot to host")
         # make sure to recieve as a non-incremental node into the graph
         if producer.node.node_type == 'complete':
             graph.add(producer.node)
@@ -212,7 +225,6 @@ class HostSnapshotManager:
                         if process.stderr:
                             error += process.stderr.read()
                         raise subprocess.CalledProcessError(returncode, cmd, stderr=error)
-            except subprocess.CalledProcessError as e:
-                logger.exception(f"Failed to receive snapshot stream for {producer}")
-                print(e.stderr, file=sys.stderr)
+            except subprocess.CalledProcessError:
+                lgr.exception("Failed to recieve snapshot stream")
                 raise

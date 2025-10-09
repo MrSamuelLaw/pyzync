@@ -1,16 +1,13 @@
 import time
 import asyncio
-import logging
-from typing import (Generator, TypeAlias, Iterable, Literal, AsyncIterable, AsyncGenerator, Coroutine)
-from threading import Thread, Lock, Event
+from typing import (Generator, TypeAlias, Iterable, Literal)
 
-from pydantic import BaseModel
+import humanize
 
-from pyzync.otel import trace, with_tracer
+from pyzync import logging
 from pyzync.interfaces import SnapshotNode
 
-logger = logging.getLogger(__name__)
-tracer = trace.get_tracer(__name__)
+logger = logging.get_logger(__name__)
 
 BytesConsumer: TypeAlias = Generator[None, bytes, None]
 ExitStatus: TypeAlias = Literal['SUCCESS', 'FAILURE']
@@ -38,14 +35,16 @@ class SnapshotStreamProducer(SnapshotStreamBase):
         super().__init__()
         self.node = node
         self.generator = generator
+        self.l = logger.bind(generator=generator)
 
-    async def produce_chunk(self) -> bytes:
+    async def produce_chunk(self) -> bytes | None:
         try:
             start = time.time()
             chunk = await asyncio.to_thread(self.sync2async_gen_wrapper, next, self.generator)
             end = time.time()
             nbytes = 0 if chunk is None else len(chunk)
             nseconds = 0 if chunk is None else end - start
+            self.l.debug('Produced bytes', nbytes=humanize.naturalsize(nbytes), nseconds=f'{nseconds:.2f}')
             self.total_bytes_transfered += nbytes
             self.total_seconds += nseconds
             return chunk
@@ -54,6 +53,7 @@ class SnapshotStreamProducer(SnapshotStreamBase):
             return
         except Exception as e:
             self.exit_exception = e
+            self.l.exception("Failed to produce bytes")
             raise
 
 
@@ -63,6 +63,7 @@ class SnapshotStreamConsumer(SnapshotStreamBase):
         super().__init__()
         self.node = node
         self.generator = generator
+        self.l = logger.bind(generator=generator, node=node)
         next(self.generator)  # prime the consumer
 
     async def consume_chunk(self, chunk: bytes):
@@ -72,6 +73,7 @@ class SnapshotStreamConsumer(SnapshotStreamBase):
             end = time.time()
             nbytes = 0 if chunk is None else len(chunk)
             nseconds = 0 if chunk is None else end - start
+            self.l.debug('Consumed bytes', nbytes=humanize.naturalsize(nbytes), nseconds=nseconds.__round__(3))
             self.total_bytes_transfered += nbytes
             self.total_seconds += nseconds
         except StopAsyncIteration:
@@ -79,6 +81,7 @@ class SnapshotStreamConsumer(SnapshotStreamBase):
             return
         except Exception as e:
             self.exit_exception = e
+            self.l.exception("Failed to consume bytes")
             raise
 
 
@@ -87,6 +90,7 @@ class SnapshotStreamManager:
     def __init__(self, producer: SnapshotStreamProducer, consumers: list[SnapshotStreamConsumer]):
         self.producer = producer
         self.consumers = list(consumers)
+        self.l = logger.bind()
 
         if any((c.node != self.producer.node for c in self.consumers)):
             raise ValueError(
@@ -106,8 +110,7 @@ class SnapshotStreamManager:
 
         # publish final statuses
         if self.producer.exit_exception:
-            logger.error(
-                f'Producer = {self.producer} exited with exception: \n{self.producer.exit_exception}')
+            self.l.error("Producer exited exceptionally", producer_generator=self.producer.generator)
         for c in self.consumers:
             if c.exit_exception:
-                logger.error(f'Consumer = {c} exited with exception: \n{c.exit_exception}')
+                self.l.error("Consumer completed exceptionally", consumer_generator=c.generator)

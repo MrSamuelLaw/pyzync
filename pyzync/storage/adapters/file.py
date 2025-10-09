@@ -1,16 +1,17 @@
 import re
-import logging
 from pathlib import Path, PurePath
 from typing import Optional
 
+import humanize
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from pyzync import logging
 from pyzync.otel import with_tracer, trace
 from pyzync.interfaces import ZfsDatasetId, ZfsFilePath, SnapshotNode
 from pyzync.storage.interfaces import SnapshotStorageAdapter
 
-logger = logging.getLogger(__file__)
-tracer = trace.get_tracer(__file__)
+logger = logging.get_logger(__name__)
+tracer = trace.get_tracer(__name__)
 
 
 class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
@@ -32,9 +33,9 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
 
     @with_tracer(tracer)
     def query(self, dataset_id: Optional[ZfsDatasetId] = None):
-        logger.debug(f"[LocalFileStorageAdapter] query called with dataset_id={dataset_id}")
+        lgr = logger.bind(dataset_id=dataset_id, directory=self.directory)
+        lgr.debug("Querying snapshots")
         # query all the .zfs files at the root and below
-        logger.debug(f"Querying snapshot files in {self.directory} for {dataset_id}")
         glob_pattern = "*.zfs" if dataset_id is None else f"**/{dataset_id}/*.zfs"
         matches = {fp for fp in self.directory.rglob(glob_pattern)}
         matches = {r.relative_to(self.directory) for r in matches}
@@ -53,14 +54,14 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
 
     @with_tracer(tracer)
     def destroy(self, node: SnapshotNode):
-        logger.info(f"[LocalFileStorageAdapter] destroy called for node={node}")
+        lgr=logger.bind(node=node, directory=self.directory)
+        lgr.info("Detroying snapshot")
         filepath = node.filepath
         base_path = self.directory.joinpath(filepath)
         base_path = base_path.resolve()
         directory = base_path.parent
         stem = base_path.stem
         suffix = base_path.suffix
-        logger.info(f"Destroying snapshot file(s) for {base_path}")
 
         # Find all chunked files: base, _1, _2, ...
         pattern = re.compile(rf"{re.escape(stem)}_\d+{re.escape(suffix)}")
@@ -70,16 +71,16 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
         filepaths.insert(0, base_path)
         for fp in filepaths:
             fp.unlink()
-        logger.info(f"[LocalFileStorageAdapter] destroy called for node={node}")
 
     @with_tracer(tracer)
     def get_consumer(self, node: SnapshotNode):
-        logger.debug(f"[LocalFileStorageAdapter] subscribe called for node={node}")
+        lgr=logger.bind(node=node, directory=self.directory)
+        lgr.debug("Getting consumer")
         # build a function that can handle a single chunck
         path = self.directory.joinpath(node.filepath)
         # create the parent dirs if they don't exist
         if not path.parent.exists():
-            logger.debug(f"Creating parent directories {path}")
+            lgr.debug("Creating parent directories", path=path)
             path.parent.mkdir(parents=True)
 
         # define a helper function to open the file and write the stream in using context manager
@@ -89,11 +90,16 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
             file_index = 0
             cur_path = path
             handle = None
-
             try:
+                
+                nonlocal lgr
+                lgr = lgr.bind(path=path)
+                lgr.debug("Starting file consumer generator",
+                        max_file_size=humanize.naturalsize(self.max_file_size) if self.max_file_size is not None else None)
                 while True:
                     chunk = yield
                     if chunk is None:
+                        lgr.debug("Shutting down consumer generator")
                         break
                     elif handle is None:
                         handle = open(cur_path, 'wb')
@@ -109,15 +115,17 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
                         file_index += 1
                         cur_path = path.with_name(f"{path.stem}_{file_index}{path.suffix}")
                         handle = open(cur_path, 'wb')
+                        lgr = lgr.bind(path=cur_path)
+                        lgr.debug("Sharding to next file")
                         file_size = len(right)
                         handle.write(right)
                     file_size += len(chunk)
                     handle.write(chunk)
-            except IOError as e:
-                logger.exception(f"Error writing to {cur_path}: {e}")
+            except IOError:
+                lgr.exception("Error consuming bytes")
                 raise
-            except Exception as e:
-                logger.error(f"Error writing to {cur_path}: {e}")
+            except Exception:
+                lgr.error("Error consuming bytes")
                 raise
             finally:
                 if handle:
@@ -127,15 +135,15 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
         return consumer
 
     @with_tracer(tracer)
-    def get_producer(self, node: SnapshotNode, blocksize: int = 2**20):  # default blocksize = 1MB
-        logger.debug(f"[LocalFileStorageAdapter] send called for node={node}, blocksize={blocksize}")
+    def get_producer(self, node: SnapshotNode, bufsize: int = 2**20):  # default blocksize = 1MB
+        lgr = logger.bind(node=node, bufsize=humanize.naturalsize(bufsize), directory=self.directory)
+        lgr.debug("Getting producer")
         filepath = node.filepath
         base_path = self.directory.joinpath(filepath)
         base_path = base_path.resolve()
         directory = base_path.parent
         stem = base_path.stem
         suffix = base_path.suffix
-        logger.info(f"Sending snapshot file(s) for {base_path}")
 
         # Find all chunked files: base, _1, _2, ...
         pattern = re.compile(rf"{re.escape(stem)}_\d+{re.escape(suffix)}")
@@ -147,13 +155,12 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
         @with_tracer(tracer)
         def _snapshot_stream():
             for fp in filepaths:
-                with open(fp, 'rb', buffering=blocksize) as handle:
-                    logger.debug(f"Streaming node = {node} from filepath = {fp}")
+                with open(fp, 'rb', buffering=bufsize) as handle:
+                    lgr.debug("Streaming data from file", path=fp)
                     while True:
-                        chunk = handle.read(blocksize)
+                        chunk = handle.read(bufsize)
                         if not chunk:
                             break
                         yield chunk
-            logger.info(f"Successfully sent snapshot file(s) for {base_path}")
 
         return _snapshot_stream()

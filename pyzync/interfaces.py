@@ -1,21 +1,12 @@
 import re
-import time
-import logging
-import threading
 from itertools import chain
 from collections import defaultdict
-from abc import ABC, abstractmethod
 from datetime import datetime, tzinfo
-from typing import (Self, Iterable, Generator, Optional, Literal, overload, Any, TypeAlias)
+from typing import (Self, Optional, Literal, overload, Any, TypeAlias)
 
 from pydantic import (BaseModel, model_validator, computed_field, ConfigDict, GetCoreSchemaHandler,
                       validate_call)
 from pydantic_core import CoreSchema, core_schema
-
-from pyzync.otel import trace, with_tracer
-
-logger = logging.getLogger(__name__)
-tracer = trace.get_tracer(__name__)
 
 DATETIME_FORMAT = r"%Y%m%dT%H%M%S"
 DATETIME_REGEX = r'\d{8}T\d{6}'
@@ -69,6 +60,9 @@ class Datetime(datetime):
 
     def __str__(self):
         return self.strftime(DATETIME_FORMAT)
+
+    def __repr__(self):
+        return self.isoformat()
 
     @classmethod
     def __get_pydantic_core_schema__(cls, _: Any, handler: GetCoreSchemaHandler) -> CoreSchema:
