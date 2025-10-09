@@ -91,7 +91,7 @@ def sanitize_log_record(record: logging.LogRecord) -> logging.LogRecord:
         for k in record.__dict__.keys():
             if k.startswith('_'):
                 delattr(record, k)
-    except:
+    except Exception as _:
         pass
     return record
 

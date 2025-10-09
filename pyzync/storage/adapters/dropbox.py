@@ -19,8 +19,8 @@ from pyzync.storage.interfaces import SnapshotStorageAdapter
 from pyzync.otel import trace, with_tracer
 from pyzync.interfaces import ZfsDatasetId, ZfsFilePath, SnapshotNode
 
-logger = logging.get_logger('dropbox')
-tracer = trace.get_tracer('dropbox')
+logger = logging.get_logger(__name__)
+tracer = trace.get_tracer(__name__)
 
 
 class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
