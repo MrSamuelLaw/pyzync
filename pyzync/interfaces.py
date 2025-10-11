@@ -41,10 +41,10 @@ class Datetime(datetime):
 
     def __new__(cls, *args, **kwargs):
         if (len(args) == 1):
-            if (type(args[0]) == str):
+            if isinstance(args[0], str):
                 iso_string = args[0]
                 return cls.fromisoformat(iso_string)
-            elif (type(args[0]) == datetime):
+            elif isinstance(args[0], datetime):
                 dt = args[0]
                 return datetime.__new__(cls,
                                         dt.year,

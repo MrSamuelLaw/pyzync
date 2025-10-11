@@ -46,8 +46,8 @@ class RemoteSnapshotManager(BaseModel):
 
     @with_tracer(tracer)
     def query(self, dataset_id: Optional[ZfsDatasetId] = None):
-        l = logger.bind(dataset_id=dataset_id, adapter=self.adapter)
-        l.debug("Querying snapshots")
+        lgr = logger.bind(dataset_id=dataset_id, adapter=self.adapter)
+        lgr.debug("Querying snapshots")
         files = self.adapter.query(dataset_id)
         nodes = [SnapshotNode.from_zfs_filepath(f) for f in files]
         nodes = sorted(nodes, key=lambda n: n.dataset_id)  # sort so the groupby works
@@ -65,8 +65,8 @@ class RemoteSnapshotManager(BaseModel):
                 dryrun: bool = False,
                 prune: bool = False,
                 force: bool = False):
-        l = logger.bind(node=node, dryrun=dryrun, prune=prune, force=force)
-        l.info("Destroying snapshot")
+        lgr = logger.bind(node=node, dryrun=dryrun, prune=prune, force=force)
+        lgr.info("Destroying snapshot")
         # if there is only one chain, prevent the user from deleting anything but the last link
         chains = graph.get_chains()
         if (len(chains) == 1) and (node != chains[0][-1]) and (not force):
@@ -82,7 +82,7 @@ class RemoteSnapshotManager(BaseModel):
             for node in orphans:
                 graph.remove(node)
                 if not dryrun:
-                    l.debug(f'Destroying orphaned node', node=node)
+                    lgr.debug('Destroying orphaned node', node=node)
                     self.adapter.destroy(node)
 
     @with_tracer(tracer)
@@ -91,8 +91,8 @@ class RemoteSnapshotManager(BaseModel):
                      graph: SnapshotGraph,
                      bufsize: int = 100 * (2**20),  # 100 MD
                      dryrun: bool = False):
-        l = logger.bind(node=node, bufsize=humanize.naturalsize(bufsize), dryrun=dryrun, adapter=self.adapter)
-        l.info("Getting producer")
+        lgr = logger.bind(node=node, bufsize=humanize.naturalsize(bufsize), dryrun=dryrun, adapter=self.adapter)
+        lgr.info("Getting producer")
         if node not in graph.get_nodes():
             raise ValueError(f'Node = {node} not part of graph = {graph}')
         if dryrun:
@@ -116,8 +116,8 @@ class RemoteSnapshotManager(BaseModel):
             graph: SnapshotGraph,
             dryrun: bool = False,
             duplicate_policy: DuplicateDetectedPolicy = 'error') -> Optional[SnapshotStreamConsumer]:
-        l = logger.bind(node=node, dryrun=dryrun, duplicate_policy=duplicate_policy)
-        l.info("Getting consumer")
+        lgr = logger.bind(node=node, dryrun=dryrun, duplicate_policy=duplicate_policy)
+        lgr.info("Getting consumer")
         is_duplicate = node in graph.get_nodes()
         if not is_duplicate:
             graph.add(node)

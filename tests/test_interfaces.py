@@ -103,7 +103,7 @@ class TestSnapshotNode(unittest.TestCase):
             SnapshotNode(dt='20250505T120001', parent_dt='20250505T120000')  # type: ignore
 
     def test_can_build_from_snapshot_id(self):
-        node = SnapshotNode.from_zfs_snapshot_id(  # pyright: ignore[reportUnusedVariable]
+         SnapshotNode.from_zfs_snapshot_id(
             'tank0/foo@20250505T120000')
 
     def test_can_build_from_complete_filepath(self):

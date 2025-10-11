@@ -28,7 +28,7 @@ class FakeStorageAdapter(SnapshotStorageAdapter):
     def get_consumer(self, node):
 
         def _fake_consumer():
-            bytes_ = yield  # pyright: ignore[reportUnusedVariable]
+            _ = yield  # pyright: ignore[reportUnusedVariable]
 
         return _fake_consumer()
 
