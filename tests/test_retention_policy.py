@@ -1,13 +1,13 @@
 import unittest
 
 from pyzync.interfaces import SnapshotNode, SnapshotGraph
-from pyzync.retention.policies.last_n import LastNSnapshotsPolicy
+from pyzync.retention.policies.rolling import RollingNSnapshotsPolicy
 
 
 class TestRetentionPolicies(unittest.TestCase):
 
     def test_last_n_snapshots_policy(self):
-        policy = LastNSnapshotsPolicy(n_snapshots=2)
+        policy = RollingNSnapshotsPolicy(n_snapshots=2)
         nodes = [
             SnapshotNode(dt='20250601T120000', dataset_id='tank0/foo'),
             SnapshotNode(dt='20250602T120000', dataset_id='tank0/foo'),

@@ -4,6 +4,7 @@ from sys import stdout, stderr
 from functools import wraps
 from typing import IO, Sequence
 
+import dotenv
 import structlog
 
 from opentelemetry import _logs
@@ -50,6 +51,7 @@ class JsonlConsoleLogExporter(ConsoleLogExporter):
 
 
 # setup the span exporters
+dotenv.load_dotenv()
 provider = TracerProvider()
 trace.set_tracer_provider(provider)
 exporters = {
@@ -85,8 +87,8 @@ def sanitize_log_record(record: logging.LogRecord) -> logging.LogRecord:
     try:
         renderer = structlog.dev.ConsoleRenderer()
         # renderer = structlog.processors.JSONRenderer()
-        record.msg["logger"] = record._logger.name   # type: ignore
-        data = renderer(record._logger, record.name, record.msg) # type: ignore
+        record.msg["logger"] = record._logger.name  # type: ignore
+        data = renderer(record._logger, record.name, record.msg)  # type: ignore
         record.msg = data
         for k in record.__dict__.keys():
             if k.startswith('_'):
@@ -95,10 +97,12 @@ def sanitize_log_record(record: logging.LogRecord) -> logging.LogRecord:
         pass
     return record
 
-logger = logging.getLogger()
+
+log_level = environ.get("OTEL_LOG_LEVEL", "INFO")
 otel_handler = LoggingHandler()
+otel_handler.setLevel(log_level)
 otel_handler.addFilter(sanitize_log_record)
-logger.addHandler(otel_handler)
+logging.getLogger().addHandler(otel_handler)
 
 
 def with_tracer(tracer: trace.Tracer):

@@ -86,28 +86,25 @@ class RemoteSnapshotManager(BaseModel):
                     self.adapter.destroy(node)
 
     @with_tracer(tracer)
-    def get_producer(self,
-                     node: SnapshotNode,
-                     graph: SnapshotGraph,
-                     bufsize: int = 100 * (2**20),  # 100 MD
-                     dryrun: bool = False):
-        lgr = logger.bind(node=node, bufsize=humanize.naturalsize(bufsize), dryrun=dryrun, adapter=self.adapter)
+    def get_producer(
+            self,
+            node: SnapshotNode,
+            graph: SnapshotGraph,
+            bufsize: int = 100 * (2**20),  # 100 MD
+            dryrun: bool = False):
+        lgr = logger.bind(node=node,
+                          bufsize=humanize.naturalsize(bufsize),
+                          dryrun=dryrun,
+                          adapter=self.adapter)
         lgr.info("Getting producer")
         if node not in graph.get_nodes():
             raise ValueError(f'Node = {node} not part of graph = {graph}')
         if dryrun:
-            stream = SnapshotStreamProducer(
-                node=node, generator=(b'0',)
-            )
+            producer = SnapshotStreamProducer(node=node, generator=(b'0',))
         else:
-            stream = SnapshotStreamProducer(
-                node=node,
-                generator=self.adapter.get_producer(
-                    node,
-                    bufsize=bufsize
-                )
-            )
-        return stream
+            producer = SnapshotStreamProducer(node=node,
+                                              generator=self.adapter.get_producer(node, bufsize=bufsize))
+        return producer
 
     @with_tracer(tracer)
     def get_consumer(
@@ -124,5 +121,15 @@ class RemoteSnapshotManager(BaseModel):
         elif duplicate_policy == 'error':
             raise ValueError(
                 f'Cannot get consumer for duplicate node = {node} for adapter = {self.adapter}')
-        if not dryrun:
-            return SnapshotStreamConsumer(node=node, generator=self.adapter.get_consumer(node))
+        if dryrun:
+
+            def _dryrun_consumer(node: SnapshotNode):
+                while True:
+                    chunk = yield
+                    if chunk is None:
+                        break
+
+            consumer = SnapshotStreamConsumer(node=node, generator=_dryrun_consumer(node))
+        else:
+            consumer = SnapshotStreamConsumer(node=node, generator=self.adapter.get_consumer(node))
+        return consumer

@@ -1,12 +1,9 @@
-import logging
 from abc import ABC, abstractmethod
 from typing import TypeAlias
 
 from pydantic import BaseModel, ConfigDict
 
 from pyzync.interfaces import SnapshotNode, SnapshotGraph
-
-logger = logging.getLogger(__name__)
 
 Keep: TypeAlias = set[SnapshotNode]
 Destroy: TypeAlias = set[SnapshotNode]

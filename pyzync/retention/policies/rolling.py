@@ -4,7 +4,7 @@ from pyzync.interfaces import SnapshotGraph
 from pyzync.retention.interfaces import RetentionPolicy
 
 
-class LastNSnapshotsPolicy(RetentionPolicy):
+class RollingNSnapshotsPolicy(RetentionPolicy):
 
     n_snapshots: int = Field(ge=0, le=30)
 

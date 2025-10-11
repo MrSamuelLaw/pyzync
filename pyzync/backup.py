@@ -1,8 +1,8 @@
-import logging
 import asyncio
 
 from pydantic import BaseModel, ConfigDict
 
+from pyzync import logging
 from pyzync.otel import trace, with_tracer
 from pyzync.host import HostSnapshotManager
 from pyzync.streaming import SnapshotStreamManager
@@ -10,7 +10,7 @@ from pyzync.retention.interfaces import RetentionPolicy
 from pyzync.storage.interfaces import SnapshotStorageAdapter, RemoteSnapshotManager
 from pyzync.interfaces import ZfsDatasetId, SnapshotGraph, DuplicateDetectedPolicy, Datetime
 
-logger = logging.getLogger(__name__)
+logger = logging.get_logger(__name__)
 tracer = trace.get_tracer(__name__)
 
 
@@ -66,15 +66,18 @@ class BackupJob(BaseModel):
 
         # send the streams to the remote if they are not already on the remote
         producers = [
-            HostSnapshotManager.get_producer(chain[0].dt, host_graph, bufsize=self.buffer_length)
+            HostSnapshotManager.get_producer(chain[0].dt,
+                                             host_graph,
+                                             bufsize=self.buffer_length,
+                                             dryrun=dryrun)
         ]
         producers.extend([
-            HostSnapshotManager.get_producer(node.dt, host_graph, parent.dt)
+            HostSnapshotManager.get_producer(node.dt, host_graph, parent.dt, dryrun=dryrun)
             for node, parent in zip(chain[1:], chain)
         ])
 
         # build the data streams
-        stream_managers = []
+        stream_managers: list[SnapshotStreamManager] = []
         for producer in producers:
             consumers = []
             for manager, remote_graph in remotes:
@@ -97,3 +100,5 @@ class BackupJob(BaseModel):
             for node in old_nodes:
                 logger.info(f"Destroying old remote nodes: {node} for manager {manager}")
                 manager.destroy(node, remote_graph, prune=prune, force=force, dryrun=dryrun)
+
+        return stream_managers
