@@ -1,6 +1,7 @@
 # ignore cache and venv
 __pycache__/
 **/*.venv
+**/*.ruff_cache
 # ignore user env file
 .env
 # ignore vscode specific files
