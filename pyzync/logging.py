@@ -15,7 +15,7 @@ def extract_from_record(logger, method_name, event_dict):
     """
     event_dict["logger"] = getattr(logger, "name", "root")
     if not event_dict.get('_from_structlog', False):
-        event_dict["logger"] = getattr(event_dict.get("_record"), "filename", "unknown")
+        event_dict["logger"] = getattr(event_dict.get("_record"), "name", "unknown")
     return event_dict
 
 structlog.configure(
