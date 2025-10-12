@@ -33,6 +33,7 @@ backup_config = {
 # perform a rotate and run each job
 @with_tracer(tracer)
 async def main():
+    rows = []
     for dataset_id, job in backup_config.items():
         job.rotate(dataset_id)
         stream_managers = await job.sync(dataset_id)
@@ -40,7 +41,6 @@ async def main():
             'dataset', 'timestamp', 'producer sts', 'producer dur', 
             'consumer', 'consumers sts', 'consumers dur'
         ]
-        rows = []
         for sm in stream_managers:
             rows.append([
                 sm.producer.node.dataset_id, sm.producer.node.dt, sm.producer.exit_status,
@@ -49,7 +49,7 @@ async def main():
                 '\n'.join((c.exit_status for c in sm.consumers)), 
                 '\n'.join((humanize.naturaldelta(c.total_seconds) for c in sm.consumers))
             ])
-        print(tabulate(rows, headers=headers, tablefmt="grid"))
+    print(tabulate(rows, headers=headers, tablefmt="grid"))
 
 
 if __name__ == '__main__':

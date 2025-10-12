@@ -12,13 +12,13 @@ Pyzync is a Python-based tool for managing ZFS snapshot backups with pluggable r
 ## Requirements
 - Python 3.10+
 - ZFS installed and available on the host system
-- [pydantic](https://pydantic.dev/) (for data validation)
+- uv install and available on the host system
 
 ## Installation
 Clone the repository and install dependencies:
 
 ```bash
-pip install -r requirements.txt
+uv sync
 ```
 
 ## Usage
@@ -98,25 +98,7 @@ sudo zfs create tank0/foo
 sudo zfs create tank0/bar
 ```
 
-### 5. Grant ZFS Permissions to Your User or Group
-To allow your user to create and manage snapshots on the test pool, you must delegate ZFS permissions. This step is required for non-root users to create, destroy, or send/receive snapshots.
-
-
-Grant permissions to your user:
-```bash
-sudo zfs allow $USER snapshot,create,destroy,hold,release,mount,send,receive tank0
-sudo zfs allow $USER snapshot,create,destroy,hold,release,mount,send,receive tank0/foo
-sudo zfs allow $USER snapshot,create,destroy,hold,release,mount,send,receive tank0/bar
-```
-
-- This enables non-root users to manage snapshots and perform backup/restore operations on the test pool.
-- You can verify permissions with:
-
-```bash
-zfs allow tank0
-```
-
-### 6. Allow Your User to Create Files in the Dataset
+### 5. Allow Your User to Create Files in the Dataset
 
 By default, ZFS datasets are owned by root and only writable by the owner. To allow your user to create files, set your user as the owner and the group as needed on the mountpoint.
 
@@ -129,7 +111,7 @@ sudo chown -R $USER /tank0
 
 If you want all users to be able to create files, use `chmod 777` (less secure).
 
-### 7. Verify Permissions
+### 6. Verify Permissions
 Switch to your user and run:
 ```bash
 zfs list
@@ -149,10 +131,9 @@ python -m unittest discover tests
 ## Project Structure
 - `pyzync/` — Main library code
 - `tests/` — Unit tests and test data
-- `dev/` — Diagrams and development notes
 
 ## Extending
-You can add new retention policies or storage adapters by subclassing the appropriate base classes in `pyzync/retention_policies.py` and `pyzync/storage_adapters.py`.
+You can add new retention policies or storage adapters by subclassing the appropriate base classes in `pyzync/retention/interfaces.py` and `pyzync/storage/interfaces.py`.
 
 ## License
 MIT License
