@@ -28,8 +28,9 @@ class BackupJob(BaseModel):
                host: HostSnapshotManager = HostSnapshotManager,
                dt: Datetime = Datetime.now(),
                dryrun: bool = False):
+        lgr = logger.bind(dataset_id=dataset_id, dt=dt, dryrun=dryrun)
         # create a new snapshot and delete the old ones using the retention policy
-        logger.info(f"Rotating snapshots for dataset {dataset_id}")
+        lgr.info(f"Rotating snapshots")
         try:
             graphs = host.query(dataset_id)
             graph = graphs[0] if graphs else SnapshotGraph(dataset_id=dataset_id)
@@ -39,7 +40,7 @@ class BackupJob(BaseModel):
                 host.destroy(node, graph, dryrun=dryrun)
             return (keep, destroy)
         except Exception:
-            logger.exception(f"Exception during rotation for {dataset_id}")
+            lgr.exception("Failed to rotate snapshots")
             raise
 
     @with_tracer(tracer)
@@ -50,6 +51,13 @@ class BackupJob(BaseModel):
                    dryrun: bool = False,
                    prune: bool = True,
                    duplicate_policy: DuplicateDetectedPolicy = 'ignore'):
+
+        # setup the logger
+        lgr = logger.bind(dataset_id=dataset_id,
+                          force=force,
+                          dryrun=dryrun,
+                          prune=prune,
+                          duplicate_policy=duplicate_policy)
 
         # get the host graph
         graphs = host.query(dataset_id)
@@ -81,7 +89,6 @@ class BackupJob(BaseModel):
         for producer in producers:
             consumers = []
             for manager, remote_graph in remotes:
-                logger.info(f"Subscribing manager {manager} to producer {producer}")
                 consumer = manager.get_consumer(producer.node,
                                                 graph=remote_graph,
                                                 dryrun=dryrun,
@@ -91,6 +98,7 @@ class BackupJob(BaseModel):
             stream_managers.append(stream_manager)
 
         # transmit the streams in parallel
+        lgr.info("Transmitting streams")
         await asyncio.gather(*[sm.transmit() for sm in stream_managers])
 
         streamed_nodes = [producer.node for producer in producers]
@@ -98,7 +106,7 @@ class BackupJob(BaseModel):
             old_nodes = [node for node in remote_graph.get_nodes() if node not in streamed_nodes]
             old_nodes = sorted(old_nodes, key=lambda node: node.dt, reverse=True)
             for node in old_nodes:
-                logger.info(f"Destroying old remote nodes: {node} for manager {manager}")
+                lgr.info(f"Destroying old remote nodes", node=node, manager=manager)
                 manager.destroy(node, remote_graph, prune=prune, force=force, dryrun=dryrun)
 
         return stream_managers

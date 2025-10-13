@@ -3,7 +3,7 @@ import logging
 import structlog
 from os import environ
 
-log_level = environ.get("CONSOLE_LOG_LEVEL", "INFO")
+console_log_level = environ.get("CONSOLE_LOG_LEVEL", "INFO")
 
 timestamper = structlog.processors.TimeStamper(fmt="iso")
 
@@ -35,6 +35,7 @@ structlog.configure(
 )
 
 console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setLevel(console_log_level)
 console_handler.setFormatter(
     structlog.stdlib.ProcessorFormatter(processors=[
         timestamper,
@@ -47,9 +48,11 @@ console_handler.setFormatter(
         ),
     ],))
 
+otel_log_level = environ.get('OTEL_LOG_LEVEL', 'INFO')
+root_log_level = min(getattr(logging, otel_log_level, 0), getattr(logging, console_log_level, 0))
 root_logger = logging.getLogger()
 root_logger.addHandler(console_handler)
-root_logger.setLevel(log_level)
+root_logger.setLevel(root_log_level)
 
 # 3rd party loggers get set to warning
 logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
