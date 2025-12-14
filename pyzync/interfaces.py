@@ -194,6 +194,14 @@ class SnapshotGraph(BaseModel):
         nodes = list(self.get_nodes())
         return f"SnapshotGraph(dataset_id={self.dataset_id}, nodes={nodes})"
 
+    def get_node(self, snapshot_id: ZfsSnapshotId):
+        dt = Datetime(snapshot_id.split('@')[-1])
+        try:
+            node = [n for n in self._table[dt] if n.snapshot_id == snapshot_id][0]
+            return node
+        except (IndexError, KeyError):
+            raise KeyError(f"Cannot find node with snapshot if = {snapshot_id}")
+
     def get_nodes(self):
         return set(chain(*self._table.values()))
 

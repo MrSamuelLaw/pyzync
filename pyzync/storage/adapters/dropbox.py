@@ -33,7 +33,7 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
     refresh_token: Optional[SecretStr] = None
     access_token: Optional[SecretStr] = None
     max_file_size: int = 350 * (2**30)  # 350 GB
-    
+
     # Retry/backoff configuration to tolerate transient network/timeouts
     max_retries: int = 5
     backoff_base: float = 0.5  # base seconds for exponential backoff
@@ -279,7 +279,7 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
 
         files = list_files(str(directory))
         files = list_files(str(directory))
-        filepaths = [PurePath(f.name) for f in files if pattern.fullmatch(PurePath(f.name).name)]
+        filepaths = [PurePath(f.path_lower) for f in files if pattern.fullmatch(PurePath(f.name).name)]
         filepaths = sorted(filepaths, key=lambda f: int(f.stem.split('_')[-1]))
         # Insert the base file at the start
         filepaths.insert(0, base_path)

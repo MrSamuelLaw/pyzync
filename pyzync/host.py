@@ -111,11 +111,11 @@ class HostSnapshotManager:
             dryrun: bool = False) -> SnapshotStreamProducer:
         # setup the logger
         lgr = logger.bind(dataset_id=graph.dataset_id,
-                        dt=dt,
-                        parent_dt=parent_dt,
-                        dryrun=dryrun,
-                        zfs_args=zfs_args,
-                        bufsize=humanize.naturalsize(bufsize))
+                          dt=dt,
+                          parent_dt=parent_dt,
+                          dryrun=dryrun,
+                          zfs_args=zfs_args,
+                          bufsize=humanize.naturalsize(bufsize))
 
         lgr.info("Getting producer")
 
@@ -162,7 +162,7 @@ class HostSnapshotManager:
                         yield block
 
                     # check for non-zero return code
-                    returncode = process.wait(1)
+                    returncode = process.wait(30)
                     if returncode:
                         if process.stderr is not None:
                             error = process.stderr.read()
@@ -219,7 +219,7 @@ class HostSnapshotManager:
                     process.stdin.close()
 
                     # wait for the process to complete
-                    returncode = process.wait(1)
+                    returncode = process.wait(30)
                     if returncode:
                         error = b''
                         if process.stderr:
