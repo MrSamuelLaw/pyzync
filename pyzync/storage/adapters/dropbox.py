@@ -63,10 +63,8 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
         elif access_token:
             return dropbox_client.Dropbox(access_token)
         else:
-            raise RuntimeError(
-                "Dropbox credentials not found. Set DROPBOX_REFRESH_TOKEN, DROPBOX_KEY,"
-                "DROPBOX_SECRET or DROPBOX_TOKEN in your environment."
-            )
+            raise RuntimeError("Dropbox credentials not found. Set DROPBOX_REFRESH_TOKEN, DROPBOX_KEY,"
+                               "DROPBOX_SECRET or DROPBOX_TOKEN in your environment.")
 
     def _retry_call(self, fn: Callable[..., Any], *args, **kwargs) -> Any:
         """Retry a Dropbox SDK call with exponential backoff and jitter for transient errors.
@@ -175,9 +173,9 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
     def get_consumer(self, node: SnapshotNode):
         lgr = logger.bind(node=node)
         lgr.debug("Getting consumer")
-        
+
         path = self.directory.joinpath(node.filepath)
-        
+
         MODULO = 4 * (2**20)  # 4MB
         MAX_BUFFER_SIZE = 144 * (2**20)  # 144 MB
 
@@ -277,7 +275,6 @@ class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
                 entries.extend(res.entries)
             return [e for e in entries if isinstance(e, dbx_files.FileMetadata)]
 
-        files = list_files(str(directory))
         files = list_files(str(directory))
         filepaths = [PurePath(f.path_lower) for f in files if pattern.fullmatch(PurePath(f.name).name)]
         filepaths = sorted(filepaths, key=lambda f: int(f.stem.split('_')[-1]))

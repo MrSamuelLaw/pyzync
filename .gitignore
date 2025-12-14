@@ -10,6 +10,7 @@ __pycache__/
 backup.py
 backup.sh
 backup.log
+restore.py
 # ignore development files
 dev
 # ignore auto created testing files
