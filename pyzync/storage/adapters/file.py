@@ -54,7 +54,7 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
 
     @with_tracer(tracer)
     def destroy(self, node: SnapshotNode):
-        lgr=logger.bind(node=node, directory=self.directory)
+        lgr = logger.bind(node=node, directory=self.directory)
         lgr.info("Detroying snapshot")
         filepath = node.filepath
         base_path = self.directory.joinpath(filepath)
@@ -74,7 +74,7 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
 
     @with_tracer(tracer)
     def get_consumer(self, node: SnapshotNode):
-        lgr=logger.bind(node=node, directory=self.directory)
+        lgr = logger.bind(node=node, directory=self.directory)
         lgr.debug("Getting consumer")
         # build a function that can handle a single chunck
         path = self.directory.joinpath(node.filepath)
@@ -91,11 +91,12 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
             cur_path = path
             handle = None
             try:
-                
+
                 nonlocal lgr
                 lgr = lgr.bind(path=path)
                 lgr.debug("Starting file consumer generator",
-                        max_file_size=humanize.naturalsize(self.max_file_size) if self.max_file_size is not None else None)
+                          max_file_size=humanize.naturalsize(self.max_file_size)
+                          if self.max_file_size is not None else None)
                 while True:
                     chunk = yield
                     if chunk is None:
@@ -108,19 +109,23 @@ class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
                     chunk_size = len(chunk)
                     if (self.max_file_size is not None) and ((file_size + chunk_size)
                                                              > self.max_file_size):
+                        # fill up the file to the max size with the left chunk
                         split_index = self.max_file_size - file_size
                         left, right = chunk[0:split_index], chunk[split_index:]
                         handle.write(left)
+                        # close the current file and start open the next one
                         handle.close()
                         file_index += 1
                         cur_path = path.with_name(f"{path.stem}_{file_index}{path.suffix}")
                         handle = open(cur_path, 'wb')
                         lgr = lgr.bind(path=cur_path)
                         lgr.debug("Sharding to next file")
+                        # put the rest of the chunk at the start of the next file
                         file_size = len(right)
                         handle.write(right)
-                    file_size += len(chunk)
-                    handle.write(chunk)
+                    else:
+                        file_size += len(chunk)
+                        handle.write(chunk)
             except IOError:
                 lgr.exception("Error consuming bytes")
                 raise
