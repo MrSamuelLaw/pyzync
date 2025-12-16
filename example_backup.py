@@ -17,16 +17,18 @@ tracer = trace.get_tracer(__name__)
 # loads enviroment variables from .env file
 dotenv.load_dotenv()
 
-# define the backup config for each job
+# define the adapter config
 GB = 2**30  # 1 GB
+file_adapter = LocalFileStorageAdapter(directory=environ['FILE_BACKUP_DIR'])
+dbx_adapter = DropboxStorageAdapter(directory=environ['DROPBOX_DIR'],
+                                    access_token=environ['DROPBOX_TOKEN'])
+
+
+
 backup_config = {
     'tank1/foo':
         BackupJob(retention_policy=RollingNSnapshotsPolicy(n_snapshots=5),
-                  adapters=[
-                      LocalFileStorageAdapter(directory=environ['FILE_BACKUP_DIR']),
-                      DropboxStorageAdapter(directory=environ['DROPBOX_DIR'],
-                                            access_token=environ['DROPBOX_TOKEN'])
-                  ])
+                  adapters=[file_adapter, dbx_adapter])
 }
 
 
