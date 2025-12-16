@@ -24,7 +24,7 @@ uv sync
 ## Usage
 
 ### 1. Configure a Backup Job
-Edit or create a Python script (or use `pyzync/example.backup.py` as a template):
+Edit or create a Python script (or use `pyzync/example_backup.py` as a template):
 
 - Replace `'tank1/foo' and 'tank1/bar` with your ZFS dataset name.
 - Set the backup directory to a location with sufficient space.
@@ -33,7 +33,7 @@ Edit or create a Python script (or use `pyzync/example.backup.py` as a template)
 You can run backup.py from the command line:
 
 ```bash
-python ./backup.py
+run run -m backup
 ```
 
 ### 3. Scheduling Backups with Cron
@@ -57,6 +57,27 @@ crontab -e
 - Redirect output to a log file for troubleshooting.
 
 For more information on cron syntax, see [crontab.guru](https://crontab.guru/).
+
+### 4. Restoring from Backups with example_restore.py
+
+The `example_restore.py` script provides an interactive CLI for restoring ZFS snapshots from remote backups. It guides you through the entire restore process step by step.
+
+**Workflow:**
+1. **Select Adapter** — Choose where your backups are stored (e.g., Dropbox or local files)
+2. **Query Backups** — Retrieve all available snapshot graphs from the backup location
+3. **Select Dataset** — Pick which ZFS dataset to restore
+4. **Select Snapshot Chain** — Choose from available backup chains for that dataset
+5. **Select Restore Target** — Pick a specific snapshot to restore up to (allows partial restore)
+6. **Confirm** — Review the restore summary and confirm the operation
+7. **Execute** — Stream data from the remote backup and restore snapshots to your system
+
+**Running the restore:**
+
+```bash
+uv run -m example_restore
+```
+
+The script will prompt you interactively for each step. It displays snapshots as either `complete` (full backup) or `incremental` (delta since previous snapshot). You can restore up to any snapshot in the chain—all required snapshots will be restored in order.
 
 ## Setting Up an Ubuntu VM for Testing
 
