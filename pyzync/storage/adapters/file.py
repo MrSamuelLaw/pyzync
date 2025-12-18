@@ -3,7 +3,7 @@ from pathlib import Path, PurePath
 from typing import Optional
 
 import humanize
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import ConfigDict, field_validator
 
 from pyzync import logging
 from pyzync.otel import with_tracer, trace
@@ -14,7 +14,7 @@ logger = logging.get_logger(__name__)
 tracer = trace.get_tracer(__name__)
 
 
-class LocalFileStorageAdapter(SnapshotStorageAdapter, BaseModel):
+class LocalFileStorageAdapter(SnapshotStorageAdapter):
 
     model_config = ConfigDict(frozen=True)
 

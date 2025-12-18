@@ -12,7 +12,7 @@ from dropbox import files as dbx_files
 from dropbox import exceptions as dbx_exceptions
 from requests.models import Response
 from requests.exceptions import RequestException
-from pydantic import BaseModel, field_validator, SecretStr, ConfigDict
+from pydantic import field_validator, SecretStr, ConfigDict
 
 from pyzync import logging
 from pyzync.storage.interfaces import SnapshotStorageAdapter
@@ -23,7 +23,7 @@ logger = logging.get_logger(__name__)
 tracer = trace.get_tracer(__name__)
 
 
-class DropboxStorageAdapter(SnapshotStorageAdapter, BaseModel):
+class DropboxStorageAdapter(SnapshotStorageAdapter):
 
     model_config = ConfigDict(frozen=True)
 

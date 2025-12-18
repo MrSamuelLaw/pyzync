@@ -16,7 +16,9 @@ logger = logging.get_logger(__name__)
 tracer = trace.get_tracer(__name__)
 
 
-class SnapshotStorageAdapter(ABC):
+class SnapshotStorageAdapter(BaseModel, ABC):
+
+    name: str
 
     @abstractmethod
     def query(self, dataset_id: Optional[ZfsDatasetId]) -> Sequence[ZfsFilePath]:
