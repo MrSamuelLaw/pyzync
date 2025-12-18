@@ -22,10 +22,10 @@ class TestLocalFileLoopCheck(unittest.IsolatedAsyncioTestCase):
         directory = Path(__file__).resolve().parent
 
         directory1 = directory.joinpath('test_loop_check_files/three')
-        adapter = LocalFileStorageAdapter(directory=directory1, max_file_size=2**12)
+        adapter = LocalFileStorageAdapter(name='local_three', directory=directory1, max_file_size=2**12)
         manager0 = RemoteSnapshotManager(adapter=adapter)
         directory0 = directory.joinpath('test_loop_check_files/four')
-        adapter = LocalFileStorageAdapter(directory=directory0, max_file_size=2**12)
+        adapter = LocalFileStorageAdapter(name='local_four', directory=directory0, max_file_size=2**12)
         manager1 = RemoteSnapshotManager(adapter=adapter)
 
         # clean up any lingering files
@@ -119,7 +119,7 @@ class TestLocalFileLoopCheck(unittest.IsolatedAsyncioTestCase):
         config = {
             'tank0/bar':
                 BackupJob(retention_policy=RollingNSnapshotsPolicy(n_snapshots=5),
-                          adapters=[LocalFileStorageAdapter(directory=directory)])
+                          adapters=[LocalFileStorageAdapter(name='backup_files', directory=directory)])
         }
 
         # destroy all nodes from host
@@ -152,7 +152,7 @@ class TestLocalFileLoopCheck(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(host_dts, datetimes)
 
         # Check backup snapshots in storage
-        adapter = LocalFileStorageAdapter(directory=directory)
+        adapter = LocalFileStorageAdapter(name='backup_files_check', directory=directory)
         manager = RemoteSnapshotManager(adapter=adapter)
         backup_graphs = manager.query(dataset_id)
         self.assertTrue(backup_graphs)
@@ -169,14 +169,16 @@ class TestDropboxLoopCheck(unittest.IsolatedAsyncioTestCase):
         """
 
         # get an instance of the adapter
-        adapter = DropboxStorageAdapter(directory='/pyzync/three',
+        adapter = DropboxStorageAdapter(name='dropbox_three',
+                                        directory='/pyzync/three',
                                         key=environ.get('DROPBOX_KEY'),
                                         secret=environ.get('DROPBOX_SECRET'),
                                         refresh_token=environ.get("DROPBOX_REFRESH_TOKEN"),
                                         access_token=environ.get("DROPBOX_TOKEN"),
                                         max_file_size=4E+6)
         manager0 = RemoteSnapshotManager(adapter=adapter)
-        adapter = DropboxStorageAdapter(directory='/pyzync/four',
+        adapter = DropboxStorageAdapter(name='dropbox_four',
+                                        directory='/pyzync/four',
                                         key=environ.get('DROPBOX_KEY'),
                                         secret=environ.get('DROPBOX_SECRET'),
                                         refresh_token=environ.get("DROPBOX_REFRESH_TOKEN"),

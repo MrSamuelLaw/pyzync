@@ -9,6 +9,8 @@ from pyzync.storage.interfaces import SnapshotStorageAdapter, RemoteSnapshotMana
 
 class FakeStorageAdapter(SnapshotStorageAdapter):
 
+    name: str = 'fake'
+
     def query(self, dataset_id: Optional[ZfsDatasetId]):
         dataset_id = dataset_id or ZfsDatasetId('tank0/foo')
         filenames = [
