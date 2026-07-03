@@ -5,14 +5,14 @@ Pyzync is a Python-based tool for managing ZFS snapshot backups with pluggable r
 ## Features
 - Automated ZFS snapshot creation and rotation
 - Pluggable retention policies (e.g., keep last N snapshots)
-- Local file storage adapter (with support for custom adapters)
+- Local file storage and Dropbox storage  adapters (with support for your own custom adapters)
 - Sync snapshots between host and backup storage
 - Extensible and testable codebase
 
 ## Requirements
 - Python 3.10+
 - ZFS installed and available on the host system
-- uv install and available on the host system
+- uv installed and available on the host system
 
 ## Installation
 Clone the repository and install dependencies:
@@ -33,7 +33,7 @@ Edit or create a Python script (or use `pyzync/example_backup.py` as a template)
 You can run backup.py from the command line:
 
 ```bash
-run run -m backup
+uv run -m backup
 ```
 
 ### 3. Scheduling Backups with Cron
@@ -140,7 +140,7 @@ zpool status
 zfs snapshot tank0@test
 touch tank0/foo/test.txt
 ```
-You should be able to run these commands without `sudo`.
+You should be able to run these commands without `sudo`, if not verify the prior steps were performed correctly.
 
 ## Testing
 Run the test suite with:

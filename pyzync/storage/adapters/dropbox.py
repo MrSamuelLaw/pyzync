@@ -93,6 +93,7 @@ class DropboxStorageAdapter(SnapshotStorageAdapter):
                 sleep = max(0.0, sleep + random.uniform(-jitter, jitter))
                 logger.exception(
                     f"Transient Dropbox error (attempt {attempt}/{self.max_retries}), retrying in {sleep:.1f}s.",
+                    exc_info=True
                 )
                 time.sleep(sleep)
 
